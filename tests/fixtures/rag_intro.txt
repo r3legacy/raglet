@@ -1,0 +1,4 @@
+Retrieval-Augmented Generation (RAG) combines a retriever with a generator.
+The retriever finds the most relevant documents and the generator conditions
+its answer on that evidence. raglet is a tiny, local-first RAG toolkit that
+runs entirely on your machine.

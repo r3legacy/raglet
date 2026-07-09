@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "raglet"
+version = "0.1.0"
+description = "A tiny, local-first RAG toolkit with hybrid retrieval and reranking."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "raglet contributors" }]
+keywords = [
+    "rag",
+    "retrieval-augmented-generation",
+    "llm",
+    "local-ai",
+    "semantic-search",
+    "offline",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Intended Audience :: Developers",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = ["numpy>=1.23"]
+
+[project.optional-dependencies]
+local = ["sentence-transformers", "faiss-cpu"]
+cloud = ["openai", "anthropic", "requests"]
+docs = ["pypdf", "python-docx"]
+ui = ["gradio"]
+dev = ["pytest"]
+all = [
+    "sentence-transformers",
+    "faiss-cpu",
+    "openai",
+    "anthropic",
+    "requests",
+    "pypdf",
+    "python-docx",
+    "gradio",
+    "pytest",
+]
+
+[project.scripts]
+raglet = "raglet.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/r3legacy/raglet"
+Repository = "https://github.com/r3legacy/raglet"
+Issues = "https://github.com/r3legacy/raglet/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["raglet"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

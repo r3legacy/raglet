@@ -1,0 +1,108 @@
+"""Vector store backed by numpy, with optional FAISS acceleration."""
+
+import json
+import os
+from typing import Any, Dict, List, Optional
+
+import numpy as np
+
+try:  # pragma: no cover - optional dependency
+    import faiss
+
+    _HAS_FAISS = True
+except Exception:  # pragma: no cover - optional dependency
+    faiss = None
+    _HAS_FAISS = False
+
+
+class VectorStore:
+    """Stores chunk embeddings and performs cosine similarity search."""
+
+    def __init__(self) -> None:
+        self.chunks: List[Dict[str, Any]] = []
+        self._emb: Optional[np.ndarray] = None
+        self._index = None
+        self.dim = 0
+
+    def add(self, chunks: List[Dict[str, Any]], embeddings: List[List[float]]) -> None:
+        if not embeddings:
+            return
+        array = np.asarray(embeddings, dtype="float32")
+        if array.ndim != 2:
+            raise ValueError("embeddings must be a 2D list")
+        norms = np.linalg.norm(array, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        array = array / norms
+
+        if self._emb is None:
+            self._emb = array
+            self.dim = array.shape[1]
+        else:
+            self._emb = np.vstack([self._emb, array])
+            self.dim = self._emb.shape[1]
+
+        start = len(self.chunks)
+        for offset, chunk in enumerate(chunks):
+            record = dict(chunk)
+            record["_id"] = start + offset
+            self.chunks.append(record)
+        self._build_index()
+
+    def _build_index(self) -> None:
+        if _HAS_FAISS and self._emb is not None and self._emb.shape[0] > 0:
+            self._index = faiss.IndexFlatIP(self.dim)
+            self._index.add(self._emb)
+        else:
+            self._index = None
+
+    def search(self, query_vec: List[float], k: int = 5) -> List[Dict[str, Any]]:
+        if self._emb is None or len(self.chunks) == 0:
+            return []
+        query = np.asarray(query_vec, dtype="float32").reshape(1, -1)
+        norm = np.linalg.norm(query)
+        if norm > 0:
+            query = query / norm
+        k = min(k, self._emb.shape[0])
+
+        if self._index is not None:
+            scores, indices = self._index.search(query, k)
+            indices = indices[0].tolist()
+            scores = scores[0].tolist()
+        else:
+            sims = self._emb @ query[0]
+            order = np.argsort(-sims)[:k]
+            indices = order.tolist()
+            scores = sims[order].tolist()
+
+        results: List[Dict[str, Any]] = []
+        for index, score in zip(indices, scores):
+            if index < 0:
+                continue
+            record = dict(self.chunks[index])
+            record["score"] = float(score)
+            results.append(record)
+        return results
+
+    def save(self, path: str) -> None:
+        os.makedirs(path, exist_ok=True)
+        np.save(os.path.join(path, "embeddings.npy"), self._emb)
+        meta = [{k: v for k, v in c.items() if k != "_id"} for c in self.chunks]
+        with open(os.path.join(path, "chunks.json"), "w", encoding="utf-8") as handle:
+            json.dump(meta, handle, ensure_ascii=False, indent=2)
+        with open(os.path.join(path, "config.json"), "w", encoding="utf-8") as handle:
+            json.dump({"dim": self.dim, "faiss": _HAS_FAISS}, handle)
+
+    @classmethod
+    def load(cls, path: str) -> "VectorStore":
+        store = cls()
+        store._emb = np.load(os.path.join(path, "embeddings.npy"))
+        with open(os.path.join(path, "chunks.json"), encoding="utf-8") as handle:
+            chunks = json.load(handle)
+        store.dim = store._emb.shape[1]
+        store.chunks = []
+        for offset, chunk in enumerate(chunks):
+            record = dict(chunk)
+            record["_id"] = offset
+            store.chunks.append(record)
+        store._build_index()
+        return store

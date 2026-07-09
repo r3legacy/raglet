@@ -1,0 +1,24 @@
+# Core (always required)
+numpy>=1.23
+
+# Local semantic embeddings + fast vector search (recommended)
+sentence-transformers
+faiss-cpu
+
+# Sparse retrieval (raglet also ships a pure-Python BM25)
+rank-bm25
+
+# Cloud LLM / embedding providers
+openai
+anthropic
+requests
+
+# Extra document loaders
+pypdf
+python-docx
+
+# Web UI
+gradio
+
+# Development / tests
+pytest

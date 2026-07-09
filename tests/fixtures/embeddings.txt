@@ -1,0 +1,3 @@
+Embeddings map text into vectors so that similar meanings land close together.
+raglet ships with a hash embedder that needs no downloads and a local
+sentence-transformers embedder for true semantic search.

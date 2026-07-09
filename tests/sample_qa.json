@@ -1,0 +1,14 @@
+[
+  {
+    "question": "What does RAG stand for?",
+    "gold_source": "rag_intro.txt"
+  },
+  {
+    "question": "How do embeddings map text?",
+    "gold_source": "embeddings.txt"
+  },
+  {
+    "question": "What is raglet?",
+    "gold_source": "rag_intro.txt"
+  }
+]
