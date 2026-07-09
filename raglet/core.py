@@ -26,6 +26,7 @@ class RAGConfig:
 
     chunk_size: int = 500
     overlap: int = 50
+    split_by: str = "token"
     embedder: str = "hash"
     embedder_kwargs: Dict[str, Any] = field(default_factory=dict)
     llm: str = "extractive"
@@ -120,6 +121,7 @@ class RAG:
                     parent_size=self.config.parent_size,
                     child_size=self.config.child_size,
                     child_overlap=self.config.child_overlap,
+                    split_by=self.config.split_by,
                 ):
                     parent_id = pid
                     pid += 1
@@ -153,7 +155,10 @@ class RAG:
         else:
             for doc in docs:
                 for piece in chunk_text(
-                    doc["text"], self.config.chunk_size, self.config.overlap
+                    doc["text"],
+                    self.config.chunk_size,
+                    self.config.overlap,
+                    split_by=self.config.split_by,
                 ):
                     chunk_hash = self._chunk_hash(piece)
                     if chunk_hash in seen_hashes:

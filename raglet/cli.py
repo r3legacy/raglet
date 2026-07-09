@@ -33,6 +33,7 @@ def _build_rag(args: argparse.Namespace, load: bool = True) -> RAG:
         parent_size=getattr(args, "parent_size", 1500),
         child_size=getattr(args, "child_size", 500),
         child_overlap=getattr(args, "child_overlap", 50),
+        split_by=getattr(args, "split_by", "token"),
     )
     rag = RAG(config)
     if load:
@@ -153,6 +154,31 @@ def cmd_version(args: argparse.Namespace) -> None:
     print("raglet", __version__)
 
 
+def cmd_ls(args: argparse.Namespace) -> None:
+    """Print a summary of a built index (chunk/source counts, config)."""
+    rag = _build_rag(args)
+    if not rag.store.chunks:
+        print(f"[raglet] no index found at {rag.config.store_path}")
+        return
+
+    sources = {}
+    for chunk in rag.store.chunks:
+        sources[chunk.get("source", "unknown")] = (
+            sources.get(chunk.get("source", "unknown"), 0) + 1
+        )
+    print(f"[raglet] index: {rag.config.store_path}")
+    print(f"  chunks : {len(rag.store.chunks)}")
+    print(f"  sources: {len(sources)}")
+    for source, count in sorted(sources.items()):
+        print(f"    - {source} ({count})")
+    print(f"  embedder      : {rag.config.embedder}")
+    print(f"  llm           : {rag.config.llm}")
+    print(f"  chunking     : {rag.config.chunking_strategy} (split_by={rag.config.split_by})")
+    print(f"  sparse (BM25): {rag.config.use_sparse}")
+    if rag.config.use_rerank:
+        print(f"  reranker     : {rag.config.reranker}")
+
+
 def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--store",
@@ -201,6 +227,12 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
         default="flat",
         choices=["flat", "parent_child"],
         help="parent_child retrieves on small chunks but answers from parent context.",
+    )
+    parser.add_argument(
+        "--split-by",
+        default="token",
+        choices=["token", "sentence"],
+        help="Unit used to build chunks (sentence keeps sentences intact).",
     )
 
 
@@ -251,6 +283,11 @@ def main(argv: Optional[list] = None) -> None:
     remove = subparsers.add_parser("rm", parents=[_common()], help="Remove a source from the index.")
     remove.add_argument("source", help="Source basename to remove (e.g. doc.txt).")
     remove.set_defaults(func=cmd_remove)
+
+    ls = subparsers.add_parser(
+        "ls", parents=[_common()], help="List an index's chunks, sources and config."
+    )
+    ls.set_defaults(func=cmd_ls)
 
     args = parser.parse_args(argv)
 

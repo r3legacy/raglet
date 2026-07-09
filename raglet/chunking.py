@@ -62,6 +62,7 @@ def chunk_parent_child(
     parent_size: int = 1500,
     child_size: int = 500,
     child_overlap: int = 50,
+    split_by: str = "token",
 ) -> List[Dict[str, Any]]:
     """Split ``text`` into parent windows, each broken into child chunks.
 
@@ -89,7 +90,9 @@ def chunk_parent_child(
 
     blocks: List[Dict[str, Any]] = []
     for parent in parents:
-        children = chunk_text(parent, chunk_size=child_size, overlap=child_overlap)
+        children = chunk_text(
+            parent, chunk_size=child_size, overlap=child_overlap, split_by=split_by
+        )
         if children:
             blocks.append({"parent": parent, "children": children})
     return blocks

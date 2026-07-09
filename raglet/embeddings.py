@@ -30,27 +30,49 @@ class EmbeddingProvider:
 
 
 class HashEmbedding(EmbeddingProvider):
-    """Deterministic, dependency-free embeddings (signed hashed bag-of-words)."""
+    """Deterministic, dependency-free embeddings (signed hashed bag-of-words).
 
-    def __init__(self, dim: int = 256, normalize: bool = True):
+    Beyond whole-token hashing it can also hash character n-grams of each
+    token (``ngrams=True``). This captures morphological overlap between
+    related words (e.g. ``embedding``/``embeddings``) so the "dense" path
+    is no longer pure exact bag-of-words and behaves more like a cheap,
+    fully offline semantic signal.
+    """
+
+    def __init__(self, dim: int = 256, normalize: bool = True, ngrams: bool = True):
         self.dim = dim
         self.normalize = normalize
+        self.ngrams = ngrams
 
     def embed(self, texts: List[str]) -> List[List[float]]:
         out: List[List[float]] = []
         for text in texts:
             vector = [0.0] * self.dim
             for token in _tokens(text):
-                digest = int(hashlib.md5(token.encode()).hexdigest(), 16)
-                index = digest % self.dim
-                sign = 1.0 if (digest >> 7) & 1 else -1.0
-                vector[index] += sign
+                self._hash_into(vector, token)
+                if self.ngrams and len(token) > 2:
+                    for gram in _char_ngrams(token, n=3):
+                        self._hash_into(vector, gram)
             if self.normalize:
                 norm = math.sqrt(sum(value * value for value in vector))
                 if norm > 0:
                     vector = [value / norm for value in vector]
             out.append(vector)
         return out
+
+    def _hash_into(self, vector: List[float], piece: str) -> None:
+        digest = int(hashlib.md5(piece.encode()).hexdigest(), 16)
+        index = digest % self.dim
+        sign = 1.0 if (digest >> 7) & 1 else -1.0
+        vector[index] += sign
+
+
+def _char_ngrams(token: str, n: int = 3):
+    """Yield character n-grams of ``token`` (lowercased, alnum only)."""
+    cleaned = re.sub(r"[^a-z0-9]", "", token.lower())
+    if len(cleaned) < n:
+        return [cleaned] if cleaned else []
+    return [cleaned[i : i + n] for i in range(len(cleaned) - n + 1)]
 
 
 class LocalHFEmbedding(EmbeddingProvider):

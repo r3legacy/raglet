@@ -56,3 +56,30 @@ def test_save_and_load(tmp_path):
     assert loaded.chunks[0]["source"] == "x.txt"
     results = loaded.search([0.5, 0.5, 0.0], k=1)
     assert results[0]["source"] == "x.txt"
+
+
+def test_hash_embedding_ngrams_capture_morphology():
+    from raglet.embeddings import HashEmbedding
+
+    emb = HashEmbedding(dim=256, ngrams=True)
+    a = emb.embed(["embedding vector"])[0]
+    b = emb.embed(["embeddings vectors"])[0]
+    # Related surface forms should be closer than unrelated text.
+    import math
+
+    def cos(x, y):
+        dot = sum(p * q for p, q in zip(x, y))
+        nx = math.sqrt(sum(v * v for v in x))
+        ny = math.sqrt(sum(v * v for v in y))
+        return dot / (nx * ny) if nx and ny else 0.0
+
+    related = cos(a, b)
+    unrelated = cos(a, emb.embed(["banana airplane"])[0])
+    assert related > unrelated
+
+
+def test_hash_embedding_is_deterministic():
+    from raglet.embeddings import HashEmbedding
+
+    emb = HashEmbedding(dim=128, ngrams=False)
+    assert emb.embed(["same text"])[0] == emb.embed(["same text"])[0]

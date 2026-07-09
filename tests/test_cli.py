@@ -73,3 +73,33 @@ def test_eval_default_data_is_bundled():
     # The default QA file must ship with the package so `raglet eval` works
     # without an explicit --data, even when installed from a wheel.
     assert os.path.exists(eval_mod._DEFAULT_QA)
+
+
+def test_cli_ls_reports_index(tmp_path, capsys):
+    import shutil
+
+    from raglet.cli import cmd_ls
+
+    corpus = tmp_path / "c"
+    corpus.mkdir()
+    shutil.copy(
+        os.path.join(os.path.dirname(__file__), "fixtures", "rag_intro.txt"),
+        corpus / "rag_intro.txt",
+    )
+    args = _ns(store=str(tmp_path / "s"))
+    rag = _build_rag(args, load=False)
+    rag.ingest(str(corpus))
+
+    cmd_ls(args)
+    out = capsys.readouterr().out
+    assert "chunks" in out
+    assert "rag_intro.txt" in out
+
+
+def test_cli_ls_empty_index(tmp_path, capsys):
+    from raglet.cli import cmd_ls
+
+    args = _ns(store=str(tmp_path / "empty"))
+    cmd_ls(args)
+    out = capsys.readouterr().out
+    assert "no index" in out
