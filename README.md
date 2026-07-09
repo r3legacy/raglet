@@ -156,14 +156,6 @@ raglet eval --store ./.store --data tests/sample_qa.json
 # {"questions": 3, "answered": 3, "retrieval_recall@k": 1.0}
 ```
 
-## Roadmap
-
-- [ ] Metadata / filtering at retrieval time
-- [ ] Streaming answers from the LLM
-- [ ] Async ingest for large corpora
-- [ ] More document formats (HTML, JSON, Notion)
-- [ ] Pre-built Docker image for `raglet serve`
-
 ## License
 
 [MIT](LICENSE)
