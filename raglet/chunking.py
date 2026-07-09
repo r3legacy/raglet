@@ -1,7 +1,7 @@
 """Text chunking with overlap and optional sentence awareness."""
 
 import re
-from typing import List
+from typing import Any, Dict, List
 
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
 
@@ -55,3 +55,41 @@ def chunk_text(
     if current:
         chunks.append(" ".join(current))
     return chunks
+
+
+def chunk_parent_child(
+    text: str,
+    parent_size: int = 1500,
+    child_size: int = 500,
+    child_overlap: int = 50,
+) -> List[Dict[str, Any]]:
+    """Split ``text`` into parent windows, each broken into child chunks.
+
+    Returns a list of ``{"parent": <parent text>, "children": [<child>...]}``.
+    Children are used for precise retrieval; the parent text is used as the
+    richer generation context (the small-to-big pattern).
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+
+    units = text.split()
+    parents: List[str] = []
+    current: List[str] = []
+    current_len = 0
+    for unit in units:
+        if current and current_len + 1 > parent_size:
+            parents.append(" ".join(current))
+            current = []
+            current_len = 0
+        current.append(unit)
+        current_len += 1
+    if current:
+        parents.append(" ".join(current))
+
+    blocks: List[Dict[str, Any]] = []
+    for parent in parents:
+        children = chunk_text(parent, chunk_size=child_size, overlap=child_overlap)
+        if children:
+            blocks.append({"parent": parent, "children": children})
+    return blocks

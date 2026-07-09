@@ -165,7 +165,12 @@ def get_llm(name: str = "extractive", **kwargs: Any) -> LLMProvider:
     return _LLMS[name](**kwargs)
 
 
-def build_prompt(query: str, chunks: List[Dict[str, Any]], max_context_chars: int = 6000) -> str:
+def build_prompt(
+    query: str,
+    chunks: List[Dict[str, Any]],
+    max_context_chars: int = 6000,
+    history: Optional[List[tuple]] = None,
+) -> str:
     """Build a grounded prompt that cites the retrieved sources."""
     parts: List[str] = []
     used = 0
@@ -178,9 +183,19 @@ def build_prompt(query: str, chunks: List[Dict[str, Any]], max_context_chars: in
         if used >= max_context_chars:
             break
     context = "\n\n".join(parts)
+
+    history_block = ""
+    if history:
+        lines = [f"Q: {q}\nA: {a}" for q, a in history]
+        if lines:
+            history_block = (
+                "PREVIOUS CONVERSATION:\n" + "\n\n".join(lines) + "\n\n"
+            )
+
     return (
         "Answer the question using ONLY the context below. "
         "Cite the source filenames. "
         "If the answer is not in the context, say you don't know.\n\n"
+        f"{history_block}"
         f"CONTEXT:\n{context}\n\nQUESTION: {query}\n\nANSWER:"
     )

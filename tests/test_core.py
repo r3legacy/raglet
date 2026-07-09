@@ -179,3 +179,114 @@ def test_eval_multi_gold(tmp_path):
     assert multi["questions"] == 1
     assert multi["retrieval_recall@k"] >= 0.0
     assert 0.0 <= multi["precision@k"] <= 1.0
+
+
+def test_parent_child_returns_parent_context(tmp_path):
+    corpus = tmp_path / "corpus"
+    _copy_fixtures(corpus)
+    store = tmp_path / "store"
+    rag = RAG(
+        RAGConfig(
+            embedder="hash",
+            chunking_strategy="parent_child",
+            parent_size=2000,
+            child_size=200,
+            store_path=str(store),
+            top_k=3,
+        )
+    )
+    count = rag.ingest(str(corpus))
+    assert count > 0
+    # Children are indexed, parents stored separately.
+    assert rag._parents
+    assert all(c["chunk_type"] == "child" for c in rag.store.chunks)
+
+    result = rag.ask("What does RAG stand for?")
+    assert result["answer"]
+    # Generation context must be the (larger) parent text, not a bare child.
+    assert any(len(c["text"]) >= 200 for c in result["context"])
+    assert any(c.get("source") == "rag_intro.txt" for c in result["sources"])
+
+
+def test_parent_child_persists_and_reloads(tmp_path):
+    corpus = tmp_path / "corpus"
+    _copy_fixtures(corpus)
+    store = tmp_path / "store"
+    rag = RAG(
+        RAGConfig(
+            embedder="hash",
+            chunking_strategy="parent_child",
+            child_size=200,
+            store_path=str(store),
+            top_k=3,
+        )
+    )
+    rag.ingest(str(corpus))
+    rag.save()
+
+    rag2 = RAG(RAGConfig(embedder="hash", store_path=str(store), top_k=3))
+    assert rag2.load() is True
+    assert rag2.config.chunking_strategy == "parent_child"
+    assert rag2._parents
+    result = rag2.ask("What does RAG stand for?")
+    assert result["answer"]
+
+
+def test_query_expansion_lexical(tmp_path):
+    corpus = tmp_path / "corpus"
+    _copy_fixtures(corpus)
+    store = tmp_path / "store"
+    # "multi" with the offline extractive LLM falls back to lexical variants.
+    rag = RAG(RAGConfig(embedder="hash", llm="extractive", query_expansion="multi", store_path=str(store), top_k=3))
+    rag.ingest(str(corpus))
+    candidates = rag.retrieve("What is RAG and how does it work?")
+    assert candidates
+    # Expansion must not break retrieval; original query is always included.
+    assert any(c["source"] == "rag_intro.txt" for c in candidates)
+
+
+def test_faithfulness_eval_offline(tmp_path):
+    import json
+
+    corpus = tmp_path / "corpus"
+    _copy_fixtures(corpus)
+    store = tmp_path / "store"
+    rag = RAG(RAGConfig(embedder="hash", store_path=str(store), top_k=3))
+    rag.ingest(str(corpus))
+
+    qa = [
+        {
+            "question": "What does RAG stand for?",
+            "gold_answer": "Retrieval-Augmented Generation",
+            "gold_source": "rag_intro.txt",
+        }
+    ]
+    qa_file = tmp_path / "qa.json"
+    qa_file.write_text(json.dumps(qa), encoding="utf-8")
+    report = eval_mod.evaluate_answers(rag, str(qa_file))
+    assert report["questions"] == 1
+    assert 0.0 <= report["faithfulness"] <= 1.0
+    assert 0.0 <= report["avg_groundedness"] <= 1.0
+    assert report["answer_recall"] is not None
+
+
+def test_conversation_memory_carries_context(tmp_path):
+    corpus = tmp_path / "corpus"
+    _copy_fixtures(corpus)
+    store = tmp_path / "store"
+    rag = RAG(RAGConfig(embedder="hash", llm="extractive", memory_size=3, store_path=str(store), top_k=3))
+    rag.ingest(str(corpus))
+
+    first = rag.ask("What does RAG stand for?", session_id="s1")
+    assert first["answer"]
+    # The session should now contain one Q/A pair.
+    assert len(rag.memory.history("s1")) == 1
+
+    # Re-asking within the same session keeps the prior turn in memory.
+    rag.ask("Can you elaborate on that?", session_id="s1")
+    assert len(rag.memory.history("s1")) == 2
+
+    # Memory survives a reload.
+    rag2 = RAG(RAGConfig(embedder="hash", memory_size=3, store_path=str(store)))
+    rag2.load()
+    assert len(rag2.memory.history("s1")) == 2

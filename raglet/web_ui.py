@@ -25,10 +25,30 @@ def build_ui(rag: Any):
             label="Source filter (optional)",
             placeholder="Limit retrieval to a specific source filename",
         )
+        session = gr.Textbox(
+            label="Session id (optional)",
+            placeholder="Enable multi-turn memory if --memory-size > 0",
+        )
         button = gr.Button("Ask")
         out_answer = gr.Textbox(label="Answer", lines=10)
         out_sources = gr.Textbox(label="Sources", lines=4)
-        button.click(answer, inputs=[query, source], outputs=[out_answer, out_sources])
+        out_history = gr.Textbox(label="Conversation history", lines=6)
+
+        def handle(q, s, sess):
+            source_filter = s.strip() or None
+            session_id = sess.strip() or None
+            result = rag.ask(q, source=source_filter, session_id=session_id)
+            sources = "\n".join(
+                f"- {src['source']} ({src.get('score', 0):.3f})" for src in result["sources"]
+            )
+            history = ""
+            if session_id and rag.memory is not None:
+                history = "\n".join(f"Q: {q}\nA: {a}" for q, a in rag.memory.history(session_id))
+            return result["answer"], sources or "(no sources)", history or "(no history)"
+
+        button.click(
+            handle, inputs=[query, source, session], outputs=[out_answer, out_sources, out_history]
+        )
 
         gr.Markdown("## Manage index")
         rm_source = gr.Textbox(

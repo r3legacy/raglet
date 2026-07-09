@@ -28,9 +28,14 @@ local models and cloud APIs.
 - **Pluggable embedders** — `hash` (zero-dep), `local` (sentence-transformers), `openai`, `ollama`.
 - **Pluggable LLMs** — `extractive` (offline baseline), `ollama`, `openai`, `anthropic`.
 - **Optional reranking** — score-based or cross-encoder rerankers.
+- **Parent-child chunking** — index small chunks for precise retrieval but answer
+  from the larger parent context (the small-to-big pattern).
+- **Query expansion** — broaden recall with multi-query decomposition or
+  Hypothetical Document Embeddings (HyDE). Offline-friendly via lexical fallback.
+- **Conversation memory** — multi-turn sessions that remember prior Q/A turns.
+- **Built-in evaluation** — measure retrieval recall *and* answer faithfulness.
 - **Tiny & readable** — every module is a few dozen lines; great for learning RAG.
 - **CLI + Python API + Gradio UI** — use it however you like.
-- **Built-in evaluation** — measure retrieval recall on a labeled dataset.
 
 ## Installation
 
@@ -83,6 +88,11 @@ Useful flags:
 - `raglet ask "..." --source rag_intro.txt` — limit retrieval to a single source.
 - `raglet ask "..." --json` — emit the `{answer, sources, context}` result as JSON.
 - `raglet ask "..." --reranker cross-encoder --rerank-top-n 10` — choose a reranker and how many candidates it keeps.
+- `raglet ingest ./docs --chunking-strategy parent_child` — retrieve on small chunks, answer from the parent window.
+- `raglet ask "..." --query-expansion multi` — decompose the query into variants to improve recall (use `hyde` with a real LLM for Hypothetical Document Embeddings).
+- `raglet ask "..." --session my-session --memory-size 4` — keep a multi-turn conversation across calls (set `--memory-size` at ingest time).
+- `raglet rm <source>` — remove a single source from an existing index.
+- `raglet eval --store ./.store --data tests/sample_qa.json --answers` — also score generated-answer faithfulness (add `--judge llm` to use the LLM as judge).
 
 ## Going semantic & local
 
@@ -130,6 +140,45 @@ docs ──▶ │  loaders   │  .txt / .md / .pdf / .docx
    that scores well in *either* signal rises to the top.
 4. **Rerank** (optional): reorder the fused candidates with a cross-encoder
    for higher precision before generation.
+
+## Advanced features
+
+Beyond the baseline hybrid pipeline, raglet includes a few higher-level
+capabilities that stay local-first and dependency-free by default.
+
+### Parent-child (small-to-big) chunking
+
+Index large parent windows and split each into smaller children. Retrieval runs
+on the precise children, but the answer is generated from the full parent text
+so generation has richer context.
+
+```python
+rag = RAG(RAGConfig(chunking_strategy="parent_child", child_size=300, parent_size=1500))
+```
+
+### Query expansion / HyDE
+
+Improve recall by searching against several query variants, fused with RRF.
+`multi` decomposes the question (LLM-based when available, lexical otherwise);
+`hyde` embeds an LLM-drafted hypothetical answer instead of the raw query and
+requires a real LLM (it degrades gracefully to the original query otherwise).
+
+```python
+rag = RAG(RAGConfig(query_expansion="multi"))   # or "hyde" with an LLM
+```
+
+### Conversation memory
+
+Pass a `session_id` to `ask()` (and set `memory_size > 0`) to keep recent
+turns in the prompt, enabling follow-up questions. Sessions persist to disk so
+the CLI keeps a conversation alive across invocations.
+
+### Answer faithfulness evaluation
+
+`raglet.eval.evaluate_answers` (or `raglet eval --answers`) goes beyond
+retrieval: it measures how grounded the generated answer is in the retrieved
+context (`faithfulness`, offline token overlap) and, with `--judge llm`, an
+LLM-rated `groundedness` score.
 
 ## Comparison
 

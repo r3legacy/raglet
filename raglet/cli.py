@@ -22,6 +22,8 @@ def _build_rag(args: argparse.Namespace, load: bool = True) -> RAG:
         reranker=getattr(args, "reranker", "score"),
         rerank_top_n=getattr(args, "rerank_top_n", 5),
         top_k=args.top_k,
+        query_expansion=getattr(args, "query_expansion", "none"),
+        memory_size=getattr(args, "memory_size", 0),
     )
     rag = RAG(config)
     if load:
@@ -37,7 +39,12 @@ def cmd_ingest(args: argparse.Namespace) -> None:
 
 def cmd_ask(args: argparse.Namespace) -> None:
     rag = _build_rag(args)
-    result = rag.ask(args.question, k=args.top_k, source=getattr(args, "source", None))
+    result = rag.ask(
+        args.question,
+        k=args.top_k,
+        source=getattr(args, "source", None),
+        session_id=getattr(args, "session", None),
+    )
     if getattr(args, "json", False):
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
@@ -65,6 +72,11 @@ def cmd_eval(args: argparse.Namespace) -> None:
     rag = _build_rag(args)
     report = eval_mod.evaluate(rag, args.data)
     print(json.dumps(report, indent=2))
+    if getattr(args, "answers", False):
+        gen = eval_mod.evaluate_answers(
+            rag, args.data, judge=getattr(args, "judge", "offline")
+        )
+        print(json.dumps(gen, indent=2))
 
 
 def cmd_remove(args: argparse.Namespace) -> None:
@@ -98,6 +110,24 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--rerank-top-n", type=int, default=5)
     parser.add_argument("--source", default=None, help="Limit retrieval to this source.")
+    parser.add_argument(
+        "--query-expansion",
+        default="none",
+        choices=["none", "multi", "hyde"],
+        help="Expand the query into variants to improve recall (hyde needs an LLM).",
+    )
+    parser.add_argument(
+        "--memory-size",
+        type=int,
+        default=0,
+        help="Number of past Q/A turns to remember per session (0 disables).",
+    )
+    parser.add_argument(
+        "--chunking-strategy",
+        default="flat",
+        choices=["flat", "parent_child"],
+        help="parent_child retrieves on small chunks but answers from parent context.",
+    )
 
 
 def main(argv: Optional[list] = None) -> None:
@@ -117,6 +147,7 @@ def main(argv: Optional[list] = None) -> None:
     ask = subparsers.add_parser("ask", parents=[_common()], help="Ask a question.")
     ask.add_argument("question")
     ask.add_argument("--json", action="store_true", help="Emit the result as JSON.")
+    ask.add_argument("--session", default=None, help="Conversation session id (needs --memory-size).")
     ask.set_defaults(func=cmd_ask)
 
     serve = subparsers.add_parser("serve", parents=[_common()], help="Launch the Gradio web UI.")
@@ -125,6 +156,15 @@ def main(argv: Optional[list] = None) -> None:
 
     evaluate = subparsers.add_parser("eval", parents=[_common()], help="Evaluate retrieval.")
     evaluate.add_argument("--data", default=None)
+    evaluate.add_argument(
+        "--answers", action="store_true", help="Also evaluate generated answers (faithfulness)."
+    )
+    evaluate.add_argument(
+        "--judge",
+        default="offline",
+        choices=["offline", "llm"],
+        help="Groundedness judge for answer evaluation.",
+    )
     evaluate.set_defaults(func=cmd_eval)
 
     remove = subparsers.add_parser("rm", parents=[_common()], help="Remove a source from the index.")

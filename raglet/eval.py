@@ -2,7 +2,8 @@
 
 import json
 import os
-from typing import Any, Dict, List
+import re
+from typing import Any, Dict, List, Optional
 
 _DEFAULT_QA = os.path.join(os.path.dirname(__file__), "..", "tests", "sample_qa.json")
 
@@ -52,3 +53,116 @@ def evaluate(rag: Any, data_path: str = None, k: int = None) -> Dict[str, Any]:
         "precision@k": round(precision_sum / total, 3) if total else 0.0,
         "mrr": round(mrr_sum / total, 3) if total else 0.0,
     }
+
+
+_TOKEN = re.compile(r"[a-z0-9]+")
+
+
+def _tokens(text: str) -> set:
+    return set(_TOKEN.findall((text or "").lower()))
+
+
+def _faithfulness(answer: str, context: str) -> float:
+    """Offline groundedness: fraction of answer tokens present in context.
+
+    Returns 0.0 for an empty answer, 1.0 when every answer token appears in the
+    retrieved context.
+    """
+    answer_tokens = _tokens(answer)
+    if not answer_tokens:
+        return 0.0
+    context_tokens = _tokens(context)
+    overlap = len(answer_tokens & context_tokens)
+    return overlap / len(answer_tokens)
+
+
+def evaluate_answers(
+    rag: Any,
+    data_path: str = None,
+    k: int = None,
+    judge: str = "offline",
+) -> Dict[str, Any]:
+    """Evaluate *generated* answers, not just retrieval.
+
+    The dataset is a JSON list of objects with at least ``question`` and
+    optionally ``gold_answer`` (and/or ``gold_source``). For each question the
+    pipeline generates an answer and we measure:
+
+    * ``faithfulness`` — offline token overlap between the answer and the
+      retrieved context (does the answer stay grounded in the sources?).
+    * ``groundedness`` — when ``judge="llm"``, the configured LLM rates support
+      on a 1–5 scale (falls back to offline faithfulness otherwise).
+    * ``answer_recall`` — overlap between the answer and ``gold_answer``.
+
+    Returns aggregated metrics.
+    """
+    data_path = data_path or os.path.abspath(_DEFAULT_QA)
+    if not os.path.exists(data_path):
+        return {"error": f"QA file not found: {data_path}"}
+
+    with open(data_path, encoding="utf-8") as handle:
+        qa: List[Dict[str, Any]] = json.load(handle)
+
+    k = k or rag.config.top_k
+    total = len(qa)
+    faith_sum = 0.0
+    grounded_sum = 0.0
+    grounded_count = 0
+    recall_sum = 0.0
+    has_gold_answer = 0
+    answered = 0
+
+    for item in qa:
+        result = rag.ask(item["question"], k=k)
+        answer = result.get("answer", "")
+        if answer:
+            answered += 1
+        context = "\n".join(c.get("text", "") for c in result.get("context", []))
+        faith = _faithfulness(answer, context)
+        faith_sum += faith
+
+        gold_answer = item.get("gold_answer")
+        if gold_answer:
+            has_gold_answer += 1
+            ans_tokens = _tokens(answer)
+            gold_tokens = _tokens(gold_answer)
+            union = ans_tokens | gold_tokens
+            recall_sum += len(ans_tokens & gold_tokens) / len(union) if union else 0.0
+
+        if judge == "llm":
+            score = _llm_groundedness(rag, answer, context)
+            if score is not None:
+                grounded_sum += score
+                grounded_count += 1
+        else:
+            grounded_sum += faith
+            grounded_count += 1
+
+    return {
+        "questions": total,
+        "answered": answered,
+        "k": k,
+        "faithfulness": round(faith_sum / total, 3) if total else 0.0,
+        "avg_groundedness": round(grounded_sum / grounded_count, 3) if grounded_count else 0.0,
+        "answer_recall": round(recall_sum / has_gold_answer, 3) if has_gold_answer else None,
+    }
+
+
+def _llm_groundedness(rag: Any, answer: str, context: str) -> Optional[float]:
+    """Ask the configured LLM to rate 1–5 how well the answer is supported."""
+    if answer and not context:
+        return 0.0
+    if not answer:
+        return 0.0
+    prompt = (
+        "Rate how well the ANSWER is supported by the CONTEXT on a scale of "
+        "1 (unsupported) to 5 (fully supported). Reply with a single integer.\n\n"
+        f"CONTEXT:\n{context[:4000]}\n\nANSWER:\n{answer}\n\nSCORE:"
+    )
+    try:
+        raw = rag.llm.generate(prompt) or ""
+    except Exception:
+        return None
+    for token in re.findall(r"[1-5]", raw):
+        return float(token)
+    return None
