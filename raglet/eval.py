@@ -5,7 +5,9 @@ import os
 import re
 from typing import Any, Dict, List, Optional
 
-_DEFAULT_QA = os.path.join(os.path.dirname(__file__), "..", "tests", "sample_qa.json")
+# Bundled with the package so `raglet eval` works without --data even when
+# installed from a wheel (tests/ is not shipped in the distribution).
+_DEFAULT_QA = os.path.join(os.path.dirname(__file__), "sample_qa.json")
 
 
 def evaluate(rag: Any, data_path: str = None, k: int = None) -> Dict[str, Any]:

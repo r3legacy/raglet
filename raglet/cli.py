@@ -20,14 +20,47 @@ def _build_rag(args: argparse.Namespace, load: bool = True) -> RAG:
         use_sparse=not args.no_sparse,
         use_rerank=args.rerank,
         reranker=getattr(args, "reranker", "score"),
+        reranker_kwargs={},
         rerank_top_n=getattr(args, "rerank_top_n", 5),
         top_k=args.top_k,
         query_expansion=getattr(args, "query_expansion", "none"),
         memory_size=getattr(args, "memory_size", 0),
+        rrf_k=getattr(args, "rrf_k", 60),
+        dense_weight=getattr(args, "dense_weight", 1.0),
+        sparse_weight=getattr(args, "sparse_weight", 1.0),
+        answer_threshold=getattr(args, "answer_threshold", 0.15),
+        chunking_strategy=getattr(args, "chunking_strategy", "flat"),
+        parent_size=getattr(args, "parent_size", 1500),
+        child_size=getattr(args, "child_size", 500),
+        child_overlap=getattr(args, "child_overlap", 50),
     )
     rag = RAG(config)
     if load:
+        # Snapshot the runtime knobs the CLI requested *before* load(), since
+        # load()'s _restore_config() mutates self.config in place (which is the
+        # same object as our local ``config``) from the persisted index config.
+        runtime = {
+            "query_expansion": config.query_expansion,
+            "use_rerank": config.use_rerank,
+            "reranker": config.reranker,
+            "reranker_kwargs": config.reranker_kwargs,
+            "rerank_top_n": config.rerank_top_n,
+            "use_sparse": config.use_sparse,
+            "top_k": config.top_k,
+            "rrf_k": config.rrf_k,
+            "dense_weight": config.dense_weight,
+            "sparse_weight": config.sparse_weight,
+            "answer_threshold": config.answer_threshold,
+            "memory_size": config.memory_size,
+        }
         rag.load()
+        # Retrieval-time knobs are runtime decisions and must not be silently
+        # overridden by the persisted index config (which only governs
+        # index-compatibility settings like embedder/llm/chunking). Re-apply
+        # the user's CLI values and rebuild the dependent helpers.
+        for key, value in runtime.items():
+            setattr(rag.config, key, value)
+        rag._build_auxiliaries()
     return rag
 
 
@@ -138,6 +171,18 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
         choices=["score", "cross-encoder", "llm"],
     )
     parser.add_argument("--rerank-top-n", type=int, default=5)
+    parser.add_argument("--rrf-k", type=int, default=60, help="RRF smoothing constant.")
+    parser.add_argument("--dense-weight", type=float, default=1.0, help="Weight for the dense ranking in RRF.")
+    parser.add_argument("--sparse-weight", type=float, default=1.0, help="Weight for the BM25 ranking in RRF.")
+    parser.add_argument(
+        "--answer-threshold",
+        type=float,
+        default=0.15,
+        help="Minimum confidence; below this the pipeline abstains.",
+    )
+    parser.add_argument("--parent-size", type=int, default=1500, help="Parent window size (parent_child chunking).")
+    parser.add_argument("--child-size", type=int, default=500, help="Child chunk size (parent_child chunking).")
+    parser.add_argument("--child-overlap", type=int, default=50, help="Child overlap (parent_child chunking).")
     parser.add_argument("--source", default=None, help="Limit retrieval to this source.")
     parser.add_argument(
         "--query-expansion",

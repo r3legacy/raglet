@@ -81,7 +81,14 @@ class OpenAIEmbedding(EmbeddingProvider):
             raise ImportError("OpenAI embeddings require openai: pip install openai") from exc
         self._client = OpenAI(api_key=api_key)
         self.model = model
-        self.dim = 1536 if "3-small" in model else 3072
+        if "3-small" in model:
+            self.dim = 1536
+        elif "3-large" in model:
+            self.dim = 3072
+        elif "ada-002" in model:
+            self.dim = 1536
+        else:
+            self.dim = 3072
 
     def embed(self, texts: List[str]) -> List[List[float]]:
         response = self._client.embeddings.create(model=self.model, input=texts)

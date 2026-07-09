@@ -24,6 +24,26 @@ def test_add_and_search():
     assert results[0]["score"] > 0.99
 
 
+def test_remove_preserves_embedding_alignment():
+    # Removing a chunk must keep each surviving chunk's *text* aligned with its
+    # *embedding row*. A previous bug used the post-renumber id instead of the
+    # original embedding row, shifting every later chunk's vector.
+    dim = 4
+    store = VectorStore()
+    chunks = [{"text": f"t{i}", "source": f"s{i}.txt"} for i in range(dim)]
+    embeddings = [[float(i == j) for j in range(dim)] for i in range(dim)]
+    store.add(chunks, embeddings)
+
+    store.remove([1])  # drop t1
+
+    # Each surviving chunk must be retrievable by its own one-hot vector.
+    for i in (0, 2, 3):
+        vec = [float(i == j) for j in range(dim)]
+        results = store.search(vec, k=1)
+        assert results, f"no result for chunk t{i}"
+        assert results[0]["source"] == f"s{i}.txt", f"misalignment at chunk t{i}"
+
+
 def test_save_and_load(tmp_path):
     store = VectorStore()
     chunks = [{"text": "x", "source": "x.txt"}]

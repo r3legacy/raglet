@@ -99,7 +99,12 @@ class VectorStore:
 
     def save(self, path: str) -> None:
         os.makedirs(path, exist_ok=True)
-        np.save(os.path.join(path, "embeddings.npy"), self._emb)
+        if self._emb is None:
+            # Persist an empty (0, 0) array so reload stays well-defined even
+            # when no chunks have been indexed yet.
+            np.save(os.path.join(path, "embeddings.npy"), np.zeros((0, 0), dtype="float32"))
+        else:
+            np.save(os.path.join(path, "embeddings.npy"), self._emb)
         meta = [{k: v for k, v in c.items() if k != "_id"} for c in self.chunks]
         with open(os.path.join(path, "chunks.json"), "w", encoding="utf-8") as handle:
             json.dump(meta, handle, ensure_ascii=False, indent=2)
@@ -127,7 +132,9 @@ class VectorStore:
             record = dict(chunk)
             record["_id"] = new_id
             self.chunks.append(record)
-            keep_rows.append(new_id)
+            # Keep the *original* embedding row for this chunk so the text stays
+            # aligned with its vector after deletion.
+            keep_rows.append(chunk["_id"])
 
         if self._emb is not None and self._emb.shape[0] > 0:
             self._emb = self._emb[keep_rows]
@@ -139,10 +146,16 @@ class VectorStore:
     @classmethod
     def load(cls, path: str) -> "VectorStore":
         store = cls()
-        store._emb = np.load(os.path.join(path, "embeddings.npy"))
+        emb = np.load(os.path.join(path, "embeddings.npy"))
+        if emb.ndim == 2 and emb.shape[0] == 0:
+            # Saved from an empty store; keep embeddings uninitialized.
+            store._emb = None
+        else:
+            store._emb = emb
         with open(os.path.join(path, "chunks.json"), encoding="utf-8") as handle:
             chunks = json.load(handle)
-        store.dim = store._emb.shape[1]
+        if store._emb is not None:
+            store.dim = store._emb.shape[1]
         store.chunks = []
         for offset, chunk in enumerate(chunks):
             record = dict(chunk)

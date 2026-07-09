@@ -76,7 +76,10 @@ def load_documents(path: str, glob: Optional[str] = None) -> List[Dict[str, Any]
     if location.is_file():
         return [load_document(str(location))]
     if location.is_dir():
-        patterns = [glob] if glob else ["*.*"]
+        # Use a catch-all pattern so extensionless files (e.g. a dotfile-free
+        # README) are also discovered; the extension filter below still drops
+        # anything unsupported.
+        patterns = [glob] if glob else ["*"]
         found = []
         for pattern in patterns:
             found.extend(location.rglob(pattern))

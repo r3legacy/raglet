@@ -66,17 +66,18 @@ class RAG:
         self.bm25 = BM25()
         self._bm25_corpus: List[str] = []
         self._reranker: Optional[Reranker] = None
-        if self.config.use_rerank:
-            self._reranker = get_reranker(
-                self.config.reranker, llm=self.llm, **self.config.reranker_kwargs
-            )
         self._parents: Dict[int, Dict[str, Any]] = {}
         self._expander: Optional[QueryExpander] = None
         self.memory: Optional[ConversationMemory] = None
         self._build_auxiliaries()
 
     def _build_auxiliaries(self) -> None:
-        """(Re)create the query expander and conversation memory from config."""
+        """(Re)create the reranker, query expander and memory from config."""
+        self._reranker = None
+        if self.config.use_rerank:
+            self._reranker = get_reranker(
+                self.config.reranker, llm=self.llm, **self.config.reranker_kwargs
+            )
         if self.config.query_expansion != "none":
             self._expander = QueryExpander(self.config.query_expansion, self.llm)
         else:
@@ -412,7 +413,9 @@ class RAG:
             "confidence": round(confidence, 3),
             "citations": citations,
         }
-        if self.memory is not None and session_id:
+        if self.memory is not None and session_id and confidence >= self.config.answer_threshold:
+            # Only persist genuine answers; do not pollute history with the
+            # abstention message returned when retrieval is too weak.
             self.memory.add(session_id, query, answer)
         return result
 
@@ -448,8 +451,6 @@ class RAG:
 
         if confidence < self.config.answer_threshold:
             message = "(not enough context to answer confidently)"
-            if self.memory is not None and session_id:
-                self.memory.add(session_id, query, message)
             yield message
             return
 
@@ -585,11 +586,6 @@ class RAG:
 
         self.embedder = get_embedder(self.config.embedder, **self.config.embedder_kwargs)
         self.llm = get_llm(self.config.llm, **self.config.llm_kwargs)
-        self._reranker = None
-        if self.config.use_rerank:
-            self._reranker = get_reranker(
-                self.config.reranker, llm=self.llm, **self.config.reranker_kwargs
-            )
         self._parents = {}
         self._build_auxiliaries()
 
