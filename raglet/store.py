@@ -92,6 +92,36 @@ class VectorStore:
         with open(os.path.join(path, "config.json"), "w", encoding="utf-8") as handle:
             json.dump({"dim": self.dim, "faiss": _HAS_FAISS}, handle)
 
+    def remove(self, ids: List[int]) -> int:
+        """Remove chunks by their ``_id`` and return the count removed.
+
+        Rebuilds the embedding matrix and search index after deletion. Chunk
+        ``_id`` values are renumbered sequentially and stay aligned with the
+        embedding matrix rows.
+        """
+        if not ids:
+            return 0
+        drop = set(ids)
+        kept = [chunk for chunk in self.chunks if chunk.get("_id") not in drop]
+        removed = len(self.chunks) - len(kept)
+        if removed == 0:
+            return 0
+
+        keep_rows = []
+        self.chunks = []
+        for new_id, chunk in enumerate(kept):
+            record = dict(chunk)
+            record["_id"] = new_id
+            self.chunks.append(record)
+            keep_rows.append(new_id)
+
+        if self._emb is not None and self._emb.shape[0] > 0:
+            self._emb = self._emb[keep_rows]
+        else:
+            self._emb = None
+        self._build_index()
+        return removed
+
     @classmethod
     def load(cls, path: str) -> "VectorStore":
         store = cls()

@@ -31,7 +31,7 @@ local = ["sentence-transformers", "faiss-cpu"]
 cloud = ["openai", "anthropic", "requests"]
 docs = ["pypdf", "python-docx"]
 ui = ["gradio"]
-dev = ["pytest"]
+dev = ["pytest", "ruff"]
 all = [
     "sentence-transformers",
     "faiss-cpu",
@@ -57,3 +57,14 @@ packages = ["raglet"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["raglet"]

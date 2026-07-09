@@ -1,6 +1,7 @@
 """High-level RAG orchestration: ingest -> retrieve -> answer."""
 
 import hashlib
+import json
 import os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
@@ -185,10 +186,10 @@ class RAG:
             k: Number of candidates to retrieve.
             source: Optional source basename to limit retrieval to.
         """
-        chunk_filter = None
-        if source is not None:
-            chunk_filter = lambda chunk: chunk.get("source") == source
-        candidates = self.retrieve(query, k=k, filter=chunk_filter)
+        def chunk_filter(chunk: Dict[str, Any]) -> bool:
+            return chunk.get("source") == source
+
+        candidates = self.retrieve(query, k=k, filter=chunk_filter if source is not None else None)
         if not candidates:
             return {"answer": "(no relevant context found)", "sources": [], "context": []}
         prompt = build_prompt(query, candidates)
@@ -201,14 +202,101 @@ class RAG:
 
     def save(self) -> None:
         self.store.save(self.config.store_path)
+        self._save_config()
+
+    def _save_config(self) -> None:
+        """Persist the pipeline config so an index can be reloaded correctly.
+
+        The embedder/llm used to build the index are recorded so that
+        :meth:`load` reconstructs providers matching the stored embeddings
+        (dimensions must match). API keys are intentionally omitted from the
+        persisted kwargs to avoid writing secrets to disk.
+        """
+        _RAG_CONFIG_FILE = "rag_config.json"
+        config_path = os.path.join(self.config.store_path, _RAG_CONFIG_FILE)
+        serializable = {
+            "embedder": self.config.embedder,
+            "embedder_kwargs": _redact_kwargs(self.config.embedder_kwargs),
+            "llm": self.config.llm,
+            "llm_kwargs": _redact_kwargs(self.config.llm_kwargs),
+            "reranker": self.config.reranker,
+            "reranker_kwargs": _redact_kwargs(self.config.reranker_kwargs),
+            "use_rerank": self.config.use_rerank,
+            "use_sparse": self.config.use_sparse,
+            "chunk_size": self.config.chunk_size,
+            "overlap": self.config.overlap,
+            "top_k": self.config.top_k,
+            "rerank_top_n": self.config.rerank_top_n,
+        }
+        with open(config_path, "w", encoding="utf-8") as handle:
+            json.dump(serializable, handle, ensure_ascii=False, indent=2)
 
     def load(self) -> bool:
-        """Load a previously built index. Returns ``True`` if one was found."""
+        """Load a previously built index. Returns ``True`` if one was found.
+
+        When a persisted pipeline config exists it is restored so the
+        embedder/llm match the stored embeddings, overriding the defaults of
+        the config passed to the constructor.
+        """
         store_file = os.path.join(self.config.store_path, "chunks.json")
         if os.path.isdir(self.config.store_path) and os.path.exists(store_file):
+            self._restore_config()
             self.store = VectorStore.load(self.config.store_path)
             if self.config.use_sparse:
                 self._bm25_corpus = [chunk["text"] for chunk in self.store.chunks]
                 self.bm25.fit(self._bm25_corpus)
             return True
         return False
+
+    def _restore_config(self) -> None:
+        """Rebuild providers from a persisted ``rag_config.json`` if present."""
+        config_path = os.path.join(self.config.store_path, "rag_config.json")
+        if not os.path.exists(config_path):
+            return
+        with open(config_path, encoding="utf-8") as handle:
+            saved = json.load(handle)
+        self.config.embedder = saved.get("embedder", self.config.embedder)
+        self.config.embedder_kwargs = saved.get("embedder_kwargs", self.config.embedder_kwargs)
+        self.config.llm = saved.get("llm", self.config.llm)
+        self.config.llm_kwargs = saved.get("llm_kwargs", self.config.llm_kwargs)
+        self.config.reranker = saved.get("reranker", self.config.reranker)
+        self.config.reranker_kwargs = saved.get("reranker_kwargs", self.config.reranker_kwargs)
+        self.config.use_rerank = saved.get("use_rerank", self.config.use_rerank)
+        self.config.use_sparse = saved.get("use_sparse", self.config.use_sparse)
+        self.config.chunk_size = saved.get("chunk_size", self.config.chunk_size)
+        self.config.overlap = saved.get("overlap", self.config.overlap)
+        self.config.top_k = saved.get("top_k", self.config.top_k)
+        self.config.rerank_top_n = saved.get("rerank_top_n", self.config.rerank_top_n)
+
+        self.embedder = get_embedder(self.config.embedder, **self.config.embedder_kwargs)
+        self.llm = get_llm(self.config.llm, **self.config.llm_kwargs)
+        self._reranker = None
+        if self.config.use_rerank:
+            self._reranker = get_reranker(self.config.reranker, **self.config.reranker_kwargs)
+
+    def remove(self, source: str) -> int:
+        """Remove every chunk whose ``source`` matches ``source``.
+
+        Returns the number of chunks removed (0 if none matched). The index is
+        rebuilt and persisted.
+        """
+        ids = [chunk["_id"] for chunk in self.store.chunks if chunk.get("source") == source]
+        if not ids:
+            return 0
+        removed = self.store.remove(ids)
+        if self.config.use_sparse:
+            self._bm25_corpus = [chunk["text"] for chunk in self.store.chunks]
+            if self._bm25_corpus:
+                self.bm25.fit(self._bm25_corpus)
+            else:
+                self.bm25 = BM25()
+        self.save()
+        return removed
+
+
+def _redact_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop secrets from provider kwargs before persisting to disk."""
+    redacted = dict(kwargs)
+    for secret in ("api_key", "token"):
+        redacted.pop(secret, None)
+    return redacted

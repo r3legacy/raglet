@@ -4,10 +4,10 @@ import argparse
 import json
 import os
 import sys
-from typing import Any, Optional
+from typing import Optional
 
-from .core import RAG, RAGConfig
 from . import eval as eval_mod
+from .core import RAG, RAGConfig
 
 
 def _build_rag(args: argparse.Namespace, load: bool = True) -> RAG:
@@ -67,6 +67,12 @@ def cmd_eval(args: argparse.Namespace) -> None:
     print(json.dumps(report, indent=2))
 
 
+def cmd_remove(args: argparse.Namespace) -> None:
+    rag = _build_rag(args)
+    removed = rag.remove(args.source)
+    print(f"[raglet] removed {removed} chunks for source '{args.source}'")
+
+
 def cmd_version(args: argparse.Namespace) -> None:
     from . import __version__
 
@@ -120,6 +126,10 @@ def main(argv: Optional[list] = None) -> None:
     evaluate = subparsers.add_parser("eval", parents=[_common()], help="Evaluate retrieval.")
     evaluate.add_argument("--data", default=None)
     evaluate.set_defaults(func=cmd_eval)
+
+    remove = subparsers.add_parser("rm", parents=[_common()], help="Remove a source from the index.")
+    remove.add_argument("source", help="Source basename to remove (e.g. doc.txt).")
+    remove.set_defaults(func=cmd_remove)
 
     args = parser.parse_args(argv)
 

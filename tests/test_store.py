@@ -1,4 +1,3 @@
-import numpy as np
 
 from raglet.store import VectorStore
 

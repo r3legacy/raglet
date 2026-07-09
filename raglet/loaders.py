@@ -12,7 +12,7 @@ SUPPORTED_EXTENSIONS = {".txt", ".md", ".markdown", ".pdf", ".docx"}
 
 
 def _read_text(path: str) -> str:
-    with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+    with open(path, encoding="utf-8", errors="ignore") as handle:
         return handle.read()
 
 

@@ -1,6 +1,6 @@
 """Optional Gradio web UI for raglet."""
 
-from typing import Any, List, Tuple
+from typing import Any, Tuple
 
 
 def build_ui(rag: Any):
@@ -29,4 +29,19 @@ def build_ui(rag: Any):
         out_answer = gr.Textbox(label="Answer", lines=10)
         out_sources = gr.Textbox(label="Sources", lines=4)
         button.click(answer, inputs=[query, source], outputs=[out_answer, out_sources])
+
+        gr.Markdown("## Manage index")
+        rm_source = gr.Textbox(
+            label="Remove source",
+            placeholder="Source basename to delete from the index",
+        )
+        rm_button = gr.Button("Remove source")
+        out_remove = gr.Textbox(label="Result", lines=2)
+        rm_button.click(
+            lambda s: f"Removed {rag.remove(s.strip())} chunks"
+            if s.strip()
+            else "Enter a source name",
+            inputs=[rm_source],
+            outputs=[out_remove],
+        )
     return demo

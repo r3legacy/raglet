@@ -1,8 +1,8 @@
 import shutil
 from pathlib import Path
 
-from raglet.core import RAG, RAGConfig
 from raglet import eval as eval_mod
+from raglet.core import RAG, RAGConfig
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -108,3 +108,74 @@ def test_extractive_is_query_aware(tmp_path):
     result = rag.ask("How do embeddings map text into vectors?")
     sources = {s["source"] for s in result["sources"]}
     assert "embeddings.txt" in sources
+
+
+def test_config_persistence_restores_embedder(tmp_path):
+    corpus = tmp_path / "corpus"
+    _copy_fixtures(corpus)
+    store = tmp_path / "store"
+    # Index with a non-default embedder variant (different vector dim).
+    rag = RAG(
+        RAGConfig(
+            embedder="hash",
+            embedder_kwargs={"dim": 512},
+            llm="extractive",
+            store_path=str(store),
+            top_k=3,
+        )
+    )
+    rag.ingest(str(corpus))
+    rag.save()
+
+    # Reopen with default config (dim 256). Without restoring the persisted
+    # config the query dimension (256) would not match the stored embeddings
+    # (512) and retrieval would crash; the persisted config must win.
+    rag2 = RAG(RAGConfig(embedder="hash", store_path=str(store), top_k=3))
+    assert rag2.load() is True
+    assert rag2.config.embedder_kwargs.get("dim") == 512
+    candidates = rag2.retrieve("What does RAG stand for?")
+    assert candidates
+    assert any(c["source"] == "rag_intro.txt" for c in candidates)
+
+
+def test_remove_source(tmp_path):
+    corpus = tmp_path / "corpus"
+    _copy_fixtures(corpus)
+    store = tmp_path / "store"
+    rag = RAG(RAGConfig(embedder="hash", store_path=str(store), top_k=5))
+    rag.ingest(str(corpus))
+    total_before = len(rag.store.chunks)
+
+    removed = rag.remove("rag_intro.txt")
+    assert removed > 0
+    assert len(rag.store.chunks) == total_before - removed
+    assert all(c["source"] != "rag_intro.txt" for c in rag.store.chunks)
+
+    # The removed source must no longer appear in retrieval results.
+    result = rag.ask("What does RAG stand for?")
+    assert all(s["source"] != "rag_intro.txt" for s in result["sources"])
+
+    # Removal must survive a reload.
+    rag2 = RAG(RAGConfig(embedder="hash", store_path=str(store)))
+    rag2.load()
+    assert all(c["source"] != "rag_intro.txt" for c in rag2.store.chunks)
+
+
+def test_eval_multi_gold(tmp_path):
+    import json
+
+    corpus = tmp_path / "corpus"
+    _copy_fixtures(corpus)
+    store = tmp_path / "store"
+    rag = RAG(RAGConfig(embedder="hash", store_path=str(store), top_k=3))
+    rag.ingest(str(corpus))
+
+    qa = [
+        {"question": "What does RAG stand for?", "gold_source": ["rag_intro.txt", "embeddings.txt"]},
+    ]
+    qa_file = tmp_path / "qa.json"
+    qa_file.write_text(json.dumps(qa), encoding="utf-8")
+    multi = eval_mod.evaluate(rag, str(qa_file))
+    assert multi["questions"] == 1
+    assert multi["retrieval_recall@k"] >= 0.0
+    assert 0.0 <= multi["precision@k"] <= 1.0

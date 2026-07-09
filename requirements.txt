@@ -1,24 +1,11 @@
 # Core (always required)
 numpy>=1.23
 
-# Local semantic embeddings + fast vector search (recommended)
-sentence-transformers
-faiss-cpu
-
-# Sparse retrieval (raglet also ships a pure-Python BM25)
-rank-bm25
-
-# Cloud LLM / embedding providers
-openai
-anthropic
-requests
-
-# Extra document loaders
-pypdf
-python-docx
-
-# Web UI
-gradio
-
-# Development / tests
-pytest
+# raglet ships a pure-Python BM25, so no sparse-retrieval dependency is needed.
+# Semantic embeddings, cloud providers, document loaders, web UI and dev tools
+# are optional extras installed via pyproject.toml, e.g.:
+#   pip install "raglet[local]"   # sentence-transformers + faiss-cpu
+#   pip install "raglet[cloud]"    # openai + anthropic + requests
+#   pip install "raglet[docs]"     # pypdf + python-docx
+#   pip install "raglet[ui]"       # gradio
+#   pip install "raglet[all]"      # everything

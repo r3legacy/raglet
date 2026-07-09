@@ -11,7 +11,8 @@ def evaluate(rag: Any, data_path: str = None, k: int = None) -> Dict[str, Any]:
     """Evaluate retrieval quality against a labeled QA dataset.
 
     The dataset is a JSON list of ``{"question": ..., "gold_source": ...}``
-    objects. ``gold_source`` should match a chunk's ``source`` basename.
+    objects. ``gold_source`` should match a chunk's ``source`` basename and may
+    be a single string or a list of strings (multiple acceptable answers).
 
     Returns recall@k, precision@k and MRR over the labeled questions.
     """
@@ -34,12 +35,14 @@ def evaluate(rag: Any, data_path: str = None, k: int = None) -> Dict[str, Any]:
         if candidates:
             answered += 1
         gold = item.get("gold_source")
-        if gold:
-            if gold in sources:
+        gold_set = {gold} if isinstance(gold, str) else set(gold or [])
+        if gold_set:
+            found = [s for s in sources if s in gold_set]
+            if found:
                 retrieval_hits += 1
-                rank = sources.index(gold) + 1
-                mrr_sum += 1.0 / rank
-            precision_sum += (1.0 if gold in sources else 0.0) / max(len(sources), 1)
+                best_rank = min(sources.index(s) + 1 for s in found)
+                mrr_sum += 1.0 / best_rank
+            precision_sum += len(found) / max(k, 1)
 
     return {
         "questions": total,
