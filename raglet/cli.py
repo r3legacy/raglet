@@ -9,58 +9,63 @@ from typing import Optional
 from . import eval as eval_mod
 from .core import RAG, RAGConfig
 
+# (CLI arg attribute, RAGConfig attribute, transform) for knobs that may be
+# overridden at runtime. A flag is only honored when it was *explicitly*
+# given on the command line (achieved via ``argparse.SUPPRESS`` defaults),
+# so ``ls``/``eval``/``rm`` never clobber a persisted index config.
+_RUNTIME_OVERRIDES = [
+    ("query_expansion", "query_expansion", None),
+    ("rerank", "use_rerank", None),
+    ("reranker", "reranker", None),
+    ("rerank_top_n", "rerank_top_n", None),
+    ("no_sparse", "use_sparse", "negate"),
+    ("rrf_k", "rrf_k", None),
+    ("dense_weight", "dense_weight", None),
+    ("sparse_weight", "sparse_weight", None),
+    ("answer_threshold", "answer_threshold", None),
+    ("memory_size", "memory_size", None),
+    ("top_k", "top_k", None),
+    ("summarize", "summarize", None),
+    ("summarizer", "summarizer", None),
+    ("retry_on_weak", "retry_on_weak", None),
+    ("rewrite_queries", "rewrite_queries", None),
+    ("context_budget", "context_budget", None),
+]
+
 
 def _build_rag(args: argparse.Namespace, load: bool = True) -> RAG:
+    # Index-compatibility settings (embedder, llm, chunking, sizes) are taken
+    # from the CLI at construction and then *restored* from the persisted
+    # index config on load(); they are intentionally not runtime-overridable.
     config = RAGConfig(
         chunk_size=args.chunk_size,
         overlap=args.overlap,
         embedder=args.embedder,
         llm=args.llm,
         store_path=args.store,
-        use_sparse=not args.no_sparse,
-        use_rerank=args.rerank,
-        reranker=getattr(args, "reranker", "score"),
-        reranker_kwargs={},
-        rerank_top_n=getattr(args, "rerank_top_n", 5),
-        top_k=args.top_k,
-        query_expansion=getattr(args, "query_expansion", "none"),
-        memory_size=getattr(args, "memory_size", 0),
-        rrf_k=getattr(args, "rrf_k", 60),
-        dense_weight=getattr(args, "dense_weight", 1.0),
-        sparse_weight=getattr(args, "sparse_weight", 1.0),
-        answer_threshold=getattr(args, "answer_threshold", 0.15),
-        chunking_strategy=getattr(args, "chunking_strategy", "flat"),
-        parent_size=getattr(args, "parent_size", 1500),
-        child_size=getattr(args, "child_size", 500),
-        child_overlap=getattr(args, "child_overlap", 50),
-        split_by=getattr(args, "split_by", "token"),
+        chunking_strategy=args.chunking_strategy,
+        parent_size=args.parent_size,
+        child_size=args.child_size,
+        child_overlap=args.child_overlap,
+        split_by=args.split_by,
     )
+    # Only knobs the user explicitly passed on the CLI override the
+    # persisted index config; everything else keeps its saved value.
+    overrides = {}
+    for arg_attr, cfg_attr, mode in _RUNTIME_OVERRIDES:
+        if not hasattr(args, arg_attr):
+            continue
+        value = getattr(args, arg_attr)
+        if mode == "negate":
+            value = not value
+        overrides[cfg_attr] = value
+        setattr(config, cfg_attr, value)
+
     rag = RAG(config)
     if load:
-        # Snapshot the runtime knobs the CLI requested *before* load(), since
-        # load()'s _restore_config() mutates self.config in place (which is the
-        # same object as our local ``config``) from the persisted index config.
-        runtime = {
-            "query_expansion": config.query_expansion,
-            "use_rerank": config.use_rerank,
-            "reranker": config.reranker,
-            "reranker_kwargs": config.reranker_kwargs,
-            "rerank_top_n": config.rerank_top_n,
-            "use_sparse": config.use_sparse,
-            "top_k": config.top_k,
-            "rrf_k": config.rrf_k,
-            "dense_weight": config.dense_weight,
-            "sparse_weight": config.sparse_weight,
-            "answer_threshold": config.answer_threshold,
-            "memory_size": config.memory_size,
-        }
         rag.load()
-        # Retrieval-time knobs are runtime decisions and must not be silently
-        # overridden by the persisted index config (which only governs
-        # index-compatibility settings like embedder/llm/chunking). Re-apply
-        # the user's CLI values and rebuild the dependent helpers.
-        for key, value in runtime.items():
-            setattr(rag.config, key, value)
+        for cfg_attr, value in overrides.items():
+            setattr(rag.config, cfg_attr, value)
         rag._build_auxiliaries()
     return rag
 
@@ -78,7 +83,7 @@ def cmd_ask(args: argparse.Namespace) -> None:
     if getattr(args, "stream", False):
         for chunk in rag.ask_stream(
             args.question,
-            k=args.top_k,
+            k=getattr(args, "top_k", None),
             source=getattr(args, "source", None),
             session_id=getattr(args, "session", None),
             filters=filters,
@@ -89,7 +94,7 @@ def cmd_ask(args: argparse.Namespace) -> None:
 
     result = rag.ask(
         args.question,
-        k=args.top_k,
+        k=getattr(args, "top_k", None),
         source=getattr(args, "source", None),
         session_id=getattr(args, "session", None),
         filters=filters,
@@ -175,6 +180,10 @@ def cmd_ls(args: argparse.Namespace) -> None:
     print(f"  llm           : {rag.config.llm}")
     print(f"  chunking     : {rag.config.chunking_strategy} (split_by={rag.config.split_by})")
     print(f"  sparse (BM25): {rag.config.use_sparse}")
+    print(f"  summarize    : {rag.config.summarize} ({rag.config.summarizer})")
+    print(f"  retry/rewrite: {rag.config.retry_on_weak}/{rag.config.rewrite_queries}")
+    if rag.config.context_budget:
+        print(f"  ctx budget  : {rag.config.context_budget} tokens")
     if rag.config.use_rerank:
         print(f"  reranker     : {rag.config.reranker}")
 
@@ -188,45 +197,73 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--llm", default="extractive", choices=["extractive", "dummy", "ollama", "openai", "anthropic"])
     parser.add_argument("--chunk-size", type=int, default=500)
     parser.add_argument("--overlap", type=int, default=50)
-    parser.add_argument("--top-k", type=int, default=5)
-    parser.add_argument("--no-sparse", action="store_true")
-    parser.add_argument("--rerank", action="store_true")
+    parser.add_argument("--top-k", type=int, default=argparse.SUPPRESS,
+                        help="Number of candidates to retrieve.")
+    parser.add_argument("--no-sparse", action="store_true", default=argparse.SUPPRESS)
+    parser.add_argument("--rerank", action="store_true", default=argparse.SUPPRESS)
     parser.add_argument(
         "--reranker",
-        default="score",
+        default=argparse.SUPPRESS,
         choices=["score", "cross-encoder", "llm"],
     )
-    parser.add_argument("--rerank-top-n", type=int, default=5)
-    parser.add_argument("--rrf-k", type=int, default=60, help="RRF smoothing constant.")
-    parser.add_argument("--dense-weight", type=float, default=1.0, help="Weight for the dense ranking in RRF.")
-    parser.add_argument("--sparse-weight", type=float, default=1.0, help="Weight for the BM25 ranking in RRF.")
+    parser.add_argument("--rerank-top-n", type=int, default=argparse.SUPPRESS)
+    parser.add_argument("--rrf-k", type=int, default=argparse.SUPPRESS, help="RRF smoothing constant.")
+    parser.add_argument("--dense-weight", type=float, default=argparse.SUPPRESS, help="Weight for the dense ranking in RRF.")
+    parser.add_argument("--sparse-weight", type=float, default=argparse.SUPPRESS, help="Weight for the BM25 ranking in RRF.")
     parser.add_argument(
         "--answer-threshold",
         type=float,
-        default=0.15,
+        default=argparse.SUPPRESS,
         help="Minimum confidence; below this the pipeline abstains.",
     )
+    parser.add_argument("--memory-size", type=int, default=argparse.SUPPRESS,
+                        help="Number of past Q/A turns to remember per session (0 disables).")
     parser.add_argument("--parent-size", type=int, default=1500, help="Parent window size (parent_child chunking).")
     parser.add_argument("--child-size", type=int, default=500, help="Child chunk size (parent_child chunking).")
     parser.add_argument("--child-overlap", type=int, default=50, help="Child overlap (parent_child chunking).")
     parser.add_argument("--source", default=None, help="Limit retrieval to this source.")
     parser.add_argument(
         "--query-expansion",
-        default="none",
+        default=argparse.SUPPRESS,
         choices=["none", "multi", "hyde"],
         help="Expand the query into variants to improve recall (hyde needs an LLM).",
-    )
-    parser.add_argument(
-        "--memory-size",
-        type=int,
-        default=0,
-        help="Number of past Q/A turns to remember per session (0 disables).",
     )
     parser.add_argument(
         "--chunking-strategy",
         default="flat",
         choices=["flat", "parent_child"],
         help="parent_child retrieves on small chunks but answers from parent context.",
+    )
+    parser.add_argument(
+        "--summarize",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Index an offline summary node per parent (RAPTOR-lite) to boost "
+        "high-level recall. Implies parent/child grouping.",
+    )
+    parser.add_argument(
+        "--summarizer",
+        default=argparse.SUPPRESS,
+        choices=["extractive", "llm"],
+        help="How to build summary nodes (llm needs a real LLM).",
+    )
+    parser.add_argument(
+        "--retry-on-weak",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="If the first retrieval is weak, broaden the query once before abstaining.",
+    )
+    parser.add_argument(
+        "--rewrite-queries",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Rewrite follow-up questions against conversation history before retrieval.",
+    )
+    parser.add_argument(
+        "--context-budget",
+        type=int,
+        default=argparse.SUPPRESS,
+        help="Max estimated tokens of context sent to the LLM (0 = no limit).",
     )
     parser.add_argument(
         "--split-by",

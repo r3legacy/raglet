@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
@@ -45,8 +46,13 @@ class RAGConfig:
     parent_size: int = 1500
     child_size: int = 500
     child_overlap: int = 50
+    summarize: bool = False
+    summarizer: str = "extractive"
     query_expansion: str = "none"
     memory_size: int = 0
+    retry_on_weak: bool = False
+    rewrite_queries: bool = False
+    context_budget: int = 0
     answer_threshold: float = 0.15
 
 
@@ -114,18 +120,15 @@ class RAG:
         seen_hashes = {self._chunk_hash(chunk["text"]) for chunk in self.store.chunks}
         pid = (max(self._parents) + 1) if self._parents else 0
 
-        if self.config.chunking_strategy == "parent_child":
+        use_blocks = (
+            self.config.chunking_strategy == "parent_child" or self.config.summarize
+        )
+        if use_blocks:
             for doc in docs:
-                for block in chunk_parent_child(
-                    doc["text"],
-                    parent_size=self.config.parent_size,
-                    child_size=self.config.child_size,
-                    child_overlap=self.config.child_overlap,
-                    split_by=self.config.split_by,
-                ):
+                for block in self._doc_blocks(doc):
                     parent_id = pid
                     pid += 1
-                    kept_children: List[str] = []
+                    kept_texts: List[str] = []
                     for child_text in block["children"]:
                         chunk_hash = self._chunk_hash(child_text)
                         if chunk_hash in seen_hashes:
@@ -141,15 +144,31 @@ class RAG:
                                 "parent_text": block["parent"],
                             }
                         )
-                        kept_children.append(child_text)
-                    if kept_children:
+                        kept_texts.append(child_text)
+                    if self.config.summarize:
+                        summary = self._summarize(block["parent"])
+                        summary_hash = self._chunk_hash(summary)
+                        if summary and summary_hash not in seen_hashes:
+                            seen_hashes.add(summary_hash)
+                            all_chunks.append(
+                                {
+                                    "text": summary,
+                                    "source": doc["source"],
+                                    "metadata": doc.get("metadata", {}),
+                                    "chunk_type": "summary",
+                                    "parent_id": parent_id,
+                                    "parent_text": block["parent"],
+                                }
+                            )
+                            kept_texts.append(summary)
+                    if kept_texts:
                         parent_specs.append(
                             {
                                 "parent_id": parent_id,
                                 "text": block["parent"],
                                 "source": doc["source"],
                                 "metadata": doc.get("metadata", {}),
-                                "child_texts": kept_children,
+                                "child_texts": kept_texts,
                             }
                         )
         else:
@@ -230,6 +249,79 @@ class RAG:
                 if os.path.exists(file_path):
                     os.remove(file_path)
 
+    def _doc_blocks(self, doc: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Return parent/child blocks for a document given the chunking config.
+
+        In ``parent_child`` mode this delegates to :func:`chunk_parent_child`.
+        When ``summarize`` is enabled with flat chunking, each document
+        becomes a single parent block (its text + flat chunks) so that a
+        summary node can be attached to it.
+        """
+        text = doc["text"]
+        metadata = doc.get("metadata", {})
+        if self.config.chunking_strategy == "parent_child":
+            blocks = chunk_parent_child(
+                text,
+                parent_size=self.config.parent_size,
+                child_size=self.config.child_size,
+                child_overlap=self.config.child_overlap,
+                split_by=self.config.split_by,
+            )
+        else:  # flat + summarize: one parent per document
+            children = chunk_text(
+                text, self.config.chunk_size, self.config.overlap, split_by=self.config.split_by
+            )
+            blocks = [{"parent": text, "children": children}] if children else []
+        for block in blocks:
+            block.setdefault("source", doc["source"])
+            block.setdefault("metadata", metadata)
+        return blocks
+
+    def _can_judge_llm(self) -> bool:
+        """Whether the configured LLM can actually generate/score text."""
+        name = type(self.llm).__name__
+        return self.llm is not None and name not in ("ExtractiveLLM", "DummyLLM")
+
+    def _summarize(self, text: str) -> str:
+        """Produce a short summary of ``text`` for a hierarchical node.
+
+        Uses the configured LLM when ``summarizer == "llm"`` and a real
+        LLM is available; otherwise falls back to an offline extractive
+        summary (top sentences by lexical centrality).
+        """
+        if self.config.summarizer == "llm" and self._can_judge_llm():
+            prompt = (
+                "Write a concise summary of the passage below that captures its "
+                "main points. Be factual; do not ask anything.\n\nPASSAGE:\n"
+                f"{text[:4000]}\n\nSUMMARY:"
+            )
+            try:
+                summary = (self.llm.generate(prompt) or "").strip()
+                if summary:
+                    return summary
+            except Exception:
+                pass
+        return self._extractive_summary(text)
+
+    @staticmethod
+    def _extractive_summary(text: str, max_sentences: int = 3) -> str:
+        """Offline summary: the ``max_sentences`` most central sentences."""
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+        if len(sentences) <= max_sentences:
+            return " ".join(sentences)
+        freq: Dict[str, int] = {}
+        for sentence in sentences:
+            for token in re.findall(r"[a-z0-9]+", sentence.lower()):
+                freq[token] = freq.get(token, 0) + 1
+        scored = sorted(
+            sentences,
+            key=lambda s: sum(freq.get(t, 0) for t in re.findall(r"[a-z0-9]+", s.lower())),
+            reverse=True,
+        )
+        top = set(scored[:max_sentences])
+        # Preserve original reading order.
+        return " ".join(s for s in sentences if s in top)
+
     def retrieve(
         self,
         query: str,
@@ -291,7 +383,7 @@ class RAG:
         if not candidates:
             return []
 
-        if self.config.chunking_strategy == "parent_child":
+        if self._parents:
             candidates = self._map_to_parents(candidates)
 
         if self._reranker is not None:
@@ -331,6 +423,41 @@ class RAG:
         if self._expander is not None:
             return self._expander.expand(query)
         return [query]
+
+    def _rewrite_query(self, query: str, history: Optional[List[tuple]]) -> str:
+        """Make a follow-up question self-contained using prior turns.
+
+        Offline (the default ``extractive``/``dummy`` LLMs) this simply
+        prepends the most recent question so lexical retrieval can use it; with
+        a real LLM the question is genuinely rewritten against the history.
+        """
+        if not history:
+            return query
+        if self.config.rewrite_queries and self._can_judge_llm():
+            turns = "\n".join(f"Q: {q}\nA: {a}" for q, a in history[-3:])
+            prompt = (
+                "Rewrite the final QUESTION so it is self-contained given the "
+                "CONVERSATION. Return only the rewritten question.\n\n"
+                f"CONVERSATION:\n{turns}\n\nQUESTION: {query}\n\nREWRITTEN:"
+            )
+            try:
+                rewritten = (self.llm.generate(prompt) or "").strip()
+                if rewritten:
+                    return rewritten
+            except Exception:
+                pass
+        return f"{history[-1][0]} {query}"
+
+    def _robust_queries(self, query: str) -> List[str]:
+        """Broaden ``query`` for a corrective retrieval pass.
+
+        Uses the configured expander when present, otherwise a lexical
+        multi-query decomposition (which works fully offline).
+        """
+        if self._expander is not None:
+            variants = self._expander.expand(query)
+            return variants if len(variants) > 1 else [query]
+        return QueryExpander("multi").expand(query)
 
     def _map_to_parents(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Collapse child hits into deduplicated parent-context candidates."""
@@ -380,8 +507,20 @@ class RAG:
         def chunk_filter(chunk: Dict[str, Any]) -> bool:
             return chunk.get("source") == source
 
+        flt = chunk_filter if source is not None else None
+
+        history = None
+        if self.memory is not None:
+            history = self.memory.history(session_id) if session_id else None
+
+        # Optionally rewrite a follow-up question against prior turns so the
+        # retrieval query is self-contained (conversational RAG).
+        retrieve_query = query
+        if self.config.rewrite_queries and history:
+            retrieve_query = self._rewrite_query(query, history)
+
         candidates = self.retrieve(
-            query, k=k, filter=chunk_filter if source is not None else None, filters=filters
+            retrieve_query, k=k, filter=flt, filters=filters
         )
         if not candidates:
             return {
@@ -393,14 +532,32 @@ class RAG:
             }
 
         confidence = self._confidence(candidates)
+
+        # Corrective retrieval: when the first pass is weak but we did find
+        # something, broaden the query once and keep the stronger result.
+        if (
+            confidence < self.config.answer_threshold
+            and self.config.retry_on_weak
+            and candidates
+        ):
+            best_c, best_conf = candidates, confidence
+            for q in self._robust_queries(retrieve_query):
+                if q == retrieve_query:
+                    continue
+                alt = self.retrieve(q, k=k, filter=flt, filters=filters)
+                alt_conf = self._confidence(alt)
+                if alt_conf > best_conf:
+                    best_c, best_conf = alt, alt_conf
+            if best_conf > confidence:
+                candidates, confidence = best_c, best_conf
+
         citations = [
             {"index": index + 1, "source": chunk.get("source"), "score": chunk.get("score")}
             for index, chunk in enumerate(candidates)
         ]
-        history = None
-        if self.memory is not None:
-            history = self.memory.history(session_id) if session_id else None
-        prompt = build_prompt(query, candidates, history=history)
+        prompt = build_prompt(
+            query, candidates, history=history, max_tokens=self.config.context_budget
+        )
 
         if confidence < self.config.answer_threshold:
             answer = "(not enough context to answer confidently)"
@@ -441,22 +598,46 @@ class RAG:
         def chunk_filter(chunk: Dict[str, Any]) -> bool:
             return chunk.get("source") == source
 
+        flt = chunk_filter if source is not None else None
+
+        history = None
+        if self.memory is not None:
+            history = self.memory.history(session_id) if session_id else None
+
+        retrieve_query = query
+        if self.config.rewrite_queries and history:
+            retrieve_query = self._rewrite_query(query, history)
+
         candidates = self.retrieve(
-            query, k=k, filter=chunk_filter if source is not None else None, filters=filters
+            retrieve_query, k=k, filter=flt, filters=filters
         )
         if not candidates:
             yield "(no relevant context found)"
             return
 
         confidence = self._confidence(candidates)
-        history = None
-        if self.memory is not None:
-            history = self.memory.history(session_id) if session_id else None
-        prompt = build_prompt(query, candidates, history=history)
+        if (
+            confidence < self.config.answer_threshold
+            and self.config.retry_on_weak
+            and candidates
+        ):
+            best_c, best_conf = candidates, confidence
+            for q in self._robust_queries(retrieve_query):
+                if q == retrieve_query:
+                    continue
+                alt = self.retrieve(q, k=k, filter=flt, filters=filters)
+                alt_conf = self._confidence(alt)
+                if alt_conf > best_conf:
+                    best_c, best_conf = alt, alt_conf
+            if best_conf > confidence:
+                candidates, confidence = best_c, best_conf
+
+        prompt = build_prompt(
+            query, candidates, history=history, max_tokens=self.config.context_budget
+        )
 
         if confidence < self.config.answer_threshold:
-            message = "(not enough context to answer confidently)"
-            yield message
+            yield "(not enough context to answer confidently)"
             return
 
         answer_parts: List[str] = []
@@ -530,7 +711,13 @@ class RAG:
             "parent_size": self.config.parent_size,
             "child_size": self.config.child_size,
             "child_overlap": self.config.child_overlap,
+            "split_by": self.config.split_by,
             "query_expansion": self.config.query_expansion,
+            "summarize": self.config.summarize,
+            "summarizer": self.config.summarizer,
+            "retry_on_weak": self.config.retry_on_weak,
+            "rewrite_queries": self.config.rewrite_queries,
+            "context_budget": self.config.context_budget,
             "answer_threshold": self.config.answer_threshold,
         }
         with open(config_path, "w", encoding="utf-8") as handle:
@@ -586,7 +773,13 @@ class RAG:
         self.config.parent_size = saved.get("parent_size", self.config.parent_size)
         self.config.child_size = saved.get("child_size", self.config.child_size)
         self.config.child_overlap = saved.get("child_overlap", self.config.child_overlap)
+        self.config.split_by = saved.get("split_by", self.config.split_by)
         self.config.query_expansion = saved.get("query_expansion", self.config.query_expansion)
+        self.config.summarize = saved.get("summarize", self.config.summarize)
+        self.config.summarizer = saved.get("summarizer", self.config.summarizer)
+        self.config.retry_on_weak = saved.get("retry_on_weak", self.config.retry_on_weak)
+        self.config.rewrite_queries = saved.get("rewrite_queries", self.config.rewrite_queries)
+        self.config.context_budget = saved.get("context_budget", self.config.context_budget)
         self.config.answer_threshold = saved.get("answer_threshold", self.config.answer_threshold)
 
         self.embedder = get_embedder(self.config.embedder, **self.config.embedder_kwargs)

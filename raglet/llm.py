@@ -245,22 +245,48 @@ def build_prompt(
     query: str,
     chunks: List[Dict[str, Any]],
     max_context_chars: int = 6000,
+    max_tokens: int = 0,
     history: Optional[List[tuple]] = None,
 ) -> str:
     """Build a grounded prompt that cites the retrieved sources.
 
     Sources are numbered ``[1]``, ``[2]`` … and the model is instructed to cite
     the relevant numbers inline so answers can be traced back to sources.
+
+    When ``max_tokens`` (>0) is given, chunks are kept from the front
+    (highest-scoring first) until the estimated token budget is exhausted;
+    the final chunk is truncated so the prompt stays within budget.
     """
+    # ``chunks`` arrive pre-sorted by score (best first), so a token budget
+    # naturally keeps the most relevant context.
+    budget = max_tokens if max_tokens and max_tokens > 0 else None
+
+    def _estimate_tokens(text: str) -> int:
+        # Rough proxy: ~4 characters per token.
+        return max(1, len(text) // 4)
+
     parts: List[str] = []
     used = 0
     for index, chunk in enumerate(chunks):
         snippet = chunk["text"]
-        if used + len(snippet) > max_context_chars:
+        if budget is not None:
+            cost = _estimate_tokens(snippet)
+            if used > 0 and used + cost > budget:
+                # Keep the most relevant chunks; drop the rest.
+                break
+            if used + cost > budget:
+                # Single chunk exceeds budget: include a truncated slice.
+                allowed = max(0, budget - used) * 4
+                snippet = snippet[:allowed]
+                cost = _estimate_tokens(snippet)
+        elif used + len(snippet) > max_context_chars:
             snippet = snippet[: max(0, max_context_chars - used)]
         parts.append(f"[Source {index + 1}] {chunk.get('source', 'unknown')}\n{snippet}")
-        used += len(snippet)
-        if used >= max_context_chars:
+        used += _estimate_tokens(snippet) if budget is not None else len(snippet)
+        if budget is not None:
+            if used >= budget:
+                break
+        elif used >= max_context_chars:
             break
     context = "\n\n".join(parts)
 

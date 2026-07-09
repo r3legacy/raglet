@@ -29,6 +29,7 @@ def _ns(**kw):
         parent_size=1500,
         child_size=500,
         child_overlap=50,
+        split_by="token",
     )
     base.update(kw)
     return argparse.Namespace(**base)

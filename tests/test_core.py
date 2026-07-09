@@ -3,6 +3,7 @@ from pathlib import Path
 
 from raglet import eval as eval_mod
 from raglet.core import RAG, RAGConfig
+from raglet.llm import build_prompt
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -308,3 +309,101 @@ def test_memory_is_runtime_switch(tmp_path):
     assert rag2.memory is not None
     rag2.ask("What does RAG stand for?", session_id="rt")
     assert len(rag2.memory.history("rt")) == 1
+
+
+def test_summarize_creates_summary_nodes(tmp_path):
+    corpus = tmp_path / "c"
+    corpus.mkdir()
+    (corpus / "a.txt").write_text(
+        "RAG stands for Retrieval Augmented Generation. "
+        "It combines a retriever with a generator. "
+        "Dense and sparse signals are fused with RRF. "
+        "HyDE drafts a hypothetical document for retrieval. "
+        "Parent-child chunking keeps larger context. "
+        "Confidence is derived from the retrieval scores. "
+        "Citations map each claim back to a source."
+    )
+    rag = RAG(
+        RAGConfig(
+            embedder="hash",
+            chunking_strategy="parent_child",
+            summarize=True,
+            store_path=str(tmp_path / "s"),
+            top_k=3,
+        )
+    )
+    assert rag.ingest(str(corpus)) > 0
+    types = {c["chunk_type"] for c in rag.store.chunks}
+    assert "summary" in types
+    res = rag.ask("What does RAG stand for?")
+    assert res["answer"]
+
+
+def test_retry_on_weak_does_not_crash(tmp_path):
+    corpus = tmp_path / "c"
+    corpus.mkdir()
+    (corpus / "a.txt").write_text("RAG stands for Retrieval Augmented Generation.")
+    rag = RAG(
+        RAGConfig(
+            embedder="hash",
+            retry_on_weak=True,
+            query_expansion="multi",
+            store_path=str(tmp_path / "s"),
+            top_k=3,
+        )
+    )
+    rag.ingest(str(corpus))
+    res = rag.ask("unrelated gibberish zzqqxx")
+    assert "confidence" in res
+
+
+def test_robust_queries_broadens():
+    rag = RAG(RAGConfig(embedder="hash"))
+    variants = rag._robust_queries("what is RAG and how does it work")
+    assert len(variants) > 1
+
+
+def test_rewrite_query_offline_concats_history():
+    rag = RAG(RAGConfig(embedder="hash"))
+    out = rag._rewrite_query("why?", [("What is RAG?", "x")])
+    assert "What is RAG?" in out and "why?" in out
+
+
+def test_build_prompt_token_budget():
+    chunks = [
+        {"text": "a" * 1000, "source": "s.txt"},
+        {"text": "b" * 1000, "source": "t.txt"},
+    ]
+    prompt = build_prompt("q", chunks, max_tokens=50)
+    # The second (large) chunk must be dropped/truncated under the budget.
+    assert "b" * 1000 not in prompt
+
+
+def test_eval_reports_ndcg(tmp_path):
+    corpus = tmp_path / "c"
+    corpus.mkdir()
+    shutil.copy(FIXTURES / "rag_intro.txt", corpus / "rag_intro.txt")
+    rag = RAG(RAGConfig(embedder="hash", store_path=str(tmp_path / "s"), top_k=3))
+    rag.ingest(str(corpus))
+    rep = eval_mod.evaluate(rag)
+    assert "ndcg@k" in rep
+
+
+def test_eval_directory_of_qa(tmp_path):
+    corpus = tmp_path / "c"
+    corpus.mkdir()
+    shutil.copy(FIXTURES / "rag_intro.txt", corpus / "rag_intro.txt")
+    rag = RAG(RAGConfig(embedder="hash", store_path=str(tmp_path / "s"), top_k=3))
+    rag.ingest(str(corpus))
+    qa_dir = tmp_path / "qa"
+    qa_dir.mkdir()
+    (qa_dir / "a.json").write_text(
+        '[{"question": "What does RAG stand for?", "gold_source": "rag_intro.txt"}]',
+        encoding="utf-8",
+    )
+    (qa_dir / "b.json").write_text(
+        '[{"question": "What is raglet?", "gold_source": "rag_intro.txt"}]',
+        encoding="utf-8",
+    )
+    rep = eval_mod.evaluate(rag, str(qa_dir))
+    assert rep["questions"] == 2
