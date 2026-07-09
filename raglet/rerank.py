@@ -1,8 +1,17 @@
 """Rerankers that reorder retrieved candidates before generation."""
 
+import re
 from typing import Any, Dict, List, Optional
 
 from .llm import LLMProvider
+
+_RERANK_PROMPT = (
+    "You are a strict relevance judge. Given the QUESTION and a CANDIDATE passage, "
+    "rate how relevant the passage is for answering the question on a scale of "
+    "0 to 100, where 0 means irrelevant and 100 means fully answers it. "
+    "Reply with a single integer and nothing else.\n\n"
+    "QUESTION: {query}\n\nCANDIDATE: {candidate}\n\nSCORE:"
+)
 
 
 class Reranker:
@@ -41,13 +50,38 @@ class CrossEncoderReranker(Reranker):
 
 
 class LLMReranker(Reranker):
-    """LLM-based reranker (degrades gracefully to score ordering)."""
+    """LLM-based reranker.
+
+    Scores each (query, candidate) pair with the configured LLM on a 0–100
+    scale and reorders by that score. When no real LLM is available it degrades
+    gracefully to ordering by the fused retrieval score so the pipeline still
+    returns a sensible ranking.
+    """
 
     def __init__(self, llm: Optional[LLMProvider] = None):
         self.llm = llm
 
+    def _can_judge(self) -> bool:
+        name = type(self.llm).__name__
+        return self.llm is not None and name not in ("ExtractiveLLM", "DummyLLM")
+
     def rerank(self, query: str, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        return sorted(candidates, key=lambda c: c.get("score", 0.0), reverse=True)
+        if not self._can_judge():
+            return sorted(candidates, key=lambda c: c.get("score", 0.0), reverse=True)
+
+        scored: List[Dict[str, Any]] = []
+        for candidate in candidates:
+            prompt = _RERANK_PROMPT.format(query=query, candidate=candidate.get("text", ""))
+            try:
+                raw = self.llm.generate(prompt) or ""
+            except Exception:
+                raw = ""
+            match = re.search(r"\d+", raw)
+            score = float(match.group(0)) if match else 0.0
+            scored.append((candidate, score))
+        for candidate, score in scored:
+            candidate["rerank_score"] = score
+        return [c for c, _ in sorted(scored, key=lambda item: item[1], reverse=True)]
 
 
 _RERANKERS = {

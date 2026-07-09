@@ -37,6 +37,9 @@ class RAGConfig:
     reranker_kwargs: Dict[str, Any] = field(default_factory=dict)
     top_k: int = 5
     rerank_top_n: int = 5
+    rrf_k: int = 60
+    dense_weight: float = 1.0
+    sparse_weight: float = 1.0
     chunking_strategy: str = "flat"
     parent_size: int = 1500
     child_size: int = 500
@@ -63,7 +66,9 @@ class RAG:
         self._bm25_corpus: List[str] = []
         self._reranker: Optional[Reranker] = None
         if self.config.use_rerank:
-            self._reranker = get_reranker(self.config.reranker, **self.config.reranker_kwargs)
+            self._reranker = get_reranker(
+                self.config.reranker, llm=self.llm, **self.config.reranker_kwargs
+            )
         self._parents: Dict[int, Dict[str, Any]] = {}
         self._expander: Optional[QueryExpander] = None
         self.memory: Optional[ConversationMemory] = None
@@ -239,6 +244,7 @@ class RAG:
         """
         k = k or self.config.top_k
         rankings: List[List[int]] = []
+        weights: List[float] = []
 
         queries = self._expand_query(query)
         for q in queries:
@@ -248,15 +254,17 @@ class RAG:
             )
             if dense:
                 rankings.append([chunk["_id"] for chunk in dense])
+                weights.append(self.config.dense_weight)
 
             if self.config.use_sparse and self._bm25_corpus:
                 sparse = self.bm25.search(q, k=max(k, 10))
                 rankings.append([index for index, _ in sparse])
+                weights.append(self.config.sparse_weight)
 
         if not rankings:
             return []
 
-        fused = reciprocal_rank_fusion(rankings)
+        fused = reciprocal_rank_fusion(rankings, weights=weights, k=self.config.rrf_k)
         candidates: List[Dict[str, Any]] = []
         seen: set = set()
         for doc_id, score in fused:
@@ -384,6 +392,9 @@ class RAG:
             "overlap": self.config.overlap,
             "top_k": self.config.top_k,
             "rerank_top_n": self.config.rerank_top_n,
+            "rrf_k": self.config.rrf_k,
+            "dense_weight": self.config.dense_weight,
+            "sparse_weight": self.config.sparse_weight,
             "chunking_strategy": self.config.chunking_strategy,
             "parent_size": self.config.parent_size,
             "child_size": self.config.child_size,
@@ -436,6 +447,9 @@ class RAG:
         self.config.overlap = saved.get("overlap", self.config.overlap)
         self.config.top_k = saved.get("top_k", self.config.top_k)
         self.config.rerank_top_n = saved.get("rerank_top_n", self.config.rerank_top_n)
+        self.config.rrf_k = saved.get("rrf_k", self.config.rrf_k)
+        self.config.dense_weight = saved.get("dense_weight", self.config.dense_weight)
+        self.config.sparse_weight = saved.get("sparse_weight", self.config.sparse_weight)
         self.config.chunking_strategy = saved.get("chunking_strategy", self.config.chunking_strategy)
         self.config.parent_size = saved.get("parent_size", self.config.parent_size)
         self.config.child_size = saved.get("child_size", self.config.child_size)
@@ -446,7 +460,9 @@ class RAG:
         self.llm = get_llm(self.config.llm, **self.config.llm_kwargs)
         self._reranker = None
         if self.config.use_rerank:
-            self._reranker = get_reranker(self.config.reranker, **self.config.reranker_kwargs)
+            self._reranker = get_reranker(
+                self.config.reranker, llm=self.llm, **self.config.reranker_kwargs
+            )
         self._parents = {}
         self._build_auxiliaries()
 
