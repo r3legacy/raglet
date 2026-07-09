@@ -90,7 +90,7 @@ Useful flags:
 - `raglet ask "..." --reranker cross-encoder --rerank-top-n 10` — choose a reranker and how many candidates it keeps.
 - `raglet ingest ./docs --chunking-strategy parent_child` — retrieve on small chunks, answer from the parent window.
 - `raglet ask "..." --query-expansion multi` — decompose the query into variants to improve recall (use `hyde` with a real LLM for Hypothetical Document Embeddings).
-- `raglet ask "..." --session my-session --memory-size 4` — keep a multi-turn conversation across calls (set `--memory-size` at ingest time).
+- `raglet ask "..." --session my-session --memory-size 4` — keep a multi-turn conversation across calls (`--memory-size` is a runtime switch; no need to rebuild the index).
 - `raglet rm <source>` — remove a single source from an existing index.
 - `raglet eval --store ./.store --data tests/sample_qa.json --answers` — also score generated-answer faithfulness (add `--judge llm` to use the LLM as judge).
 

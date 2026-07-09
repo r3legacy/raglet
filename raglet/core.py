@@ -389,7 +389,6 @@ class RAG:
             "child_size": self.config.child_size,
             "child_overlap": self.config.child_overlap,
             "query_expansion": self.config.query_expansion,
-            "memory_size": self.config.memory_size,
         }
         with open(config_path, "w", encoding="utf-8") as handle:
             json.dump(serializable, handle, ensure_ascii=False, indent=2)
@@ -442,7 +441,6 @@ class RAG:
         self.config.child_size = saved.get("child_size", self.config.child_size)
         self.config.child_overlap = saved.get("child_overlap", self.config.child_overlap)
         self.config.query_expansion = saved.get("query_expansion", self.config.query_expansion)
-        self.config.memory_size = saved.get("memory_size", self.config.memory_size)
 
         self.embedder = get_embedder(self.config.embedder, **self.config.embedder_kwargs)
         self.llm = get_llm(self.config.llm, **self.config.llm_kwargs)

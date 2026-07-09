@@ -290,3 +290,21 @@ def test_conversation_memory_carries_context(tmp_path):
     rag2 = RAG(RAGConfig(embedder="hash", memory_size=3, store_path=str(store)))
     rag2.load()
     assert len(rag2.memory.history("s1")) == 2
+
+
+def test_memory_is_runtime_switch(tmp_path):
+    # Build the index WITHOUT memory, then reopen WITH memory enabled at
+    # runtime. Memory must not be forced off by the persisted index config.
+    corpus = tmp_path / "corpus"
+    _copy_fixtures(corpus)
+    store = tmp_path / "store"
+    rag = RAG(RAGConfig(embedder="hash", store_path=str(store)))
+    rag.ingest(str(corpus))
+    rag.save()
+    assert rag.memory is None
+
+    rag2 = RAG(RAGConfig(embedder="hash", store_path=str(store), memory_size=3))
+    assert rag2.load() is True
+    assert rag2.memory is not None
+    rag2.ask("What does RAG stand for?", session_id="rt")
+    assert len(rag2.memory.history("rt")) == 1
