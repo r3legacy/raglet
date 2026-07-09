@@ -164,11 +164,6 @@ raglet eval --store ./.store --data tests/sample_qa.json
 - [ ] More document formats (HTML, JSON, Notion)
 - [ ] Pre-built Docker image for `raglet serve`
 
-## Contributing
-
-Pull requests are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md). Keep it
-tiny, keep it readable, keep dependencies optional.
-
 ## License
 
 [MIT](LICENSE)
