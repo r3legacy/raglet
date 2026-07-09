@@ -14,15 +14,51 @@ class LLMProvider:
 
 
 class ExtractiveLLM(LLMProvider):
-    """Offline baseline: returns the highest-scoring retrieved chunk.
+    """Offline baseline: returns the chunk most relevant to the query.
 
-    This keeps raglet fully functional with zero model downloads.
+    Relevance is the lexical overlap (Jaccard over token sets) between the
+    query and each candidate chunk, falling back to the retrieval score when
+    available. This keeps raglet fully functional with zero model downloads.
     """
 
     def generate(self, prompt: str, context_chunks: Optional[List[Dict[str, Any]]] = None, **kwargs: Any) -> str:
-        if context_chunks:
-            return context_chunks[0]["text"]
-        return "(no context retrieved)"
+        if not context_chunks:
+            return "(no context retrieved)"
+
+        query = _query_from_prompt(prompt)
+        query_tokens = set(_TOKEN_SPLIT.split(query.lower()))
+
+        best_chunk = None
+        best_score = float("-inf")
+        for chunk in context_chunks:
+            text_tokens = set(_TOKEN_SPLIT.split(chunk.get("text", "").lower()))
+            overlap = len(query_tokens & text_tokens)
+            union = len(query_tokens | text_tokens) or 1
+            lexical = overlap / union
+            retrieved = float(chunk.get("score", 0.0) or 0.0)
+            combined = 0.7 * lexical + 0.3 * _normalize(retrieved)
+            if combined > best_score:
+                best_score = combined
+                best_chunk = chunk
+        return best_chunk["text"]
+
+
+def _query_from_prompt(prompt: str) -> str:
+    """Extract the QUESTION portion from a prompt built by ``build_prompt``."""
+    marker = "QUESTION:"
+    index = prompt.rfind(marker)
+    if index != -1:
+        return prompt[index + len(marker):].split("ANSWER:")[0].strip()
+    return prompt
+
+
+def _normalize(value: float) -> float:
+    """Map an arbitrary retrieval score into a 0..1 range for blending."""
+    if value <= 0:
+        return 0.0
+    if value <= 1:
+        return value
+    return 1.0 / (1.0 + abs(value - 1.0))
 
 
 class DummyLLM(LLMProvider):

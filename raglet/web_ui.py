@@ -7,8 +7,9 @@ def build_ui(rag: Any):
     """Build a Gradio Blocks app bound to a :class:`raglet.RAG` instance."""
     import gradio as gr
 
-    def answer(query: str) -> Tuple[str, str]:
-        result = rag.ask(query)
+    def answer(query: str, source: str) -> Tuple[str, str]:
+        source_filter = source.strip() or None
+        result = rag.ask(query, source=source_filter)
         sources = "\n".join(
             f"- {src['source']} ({src.get('score', 0):.3f})" for src in result["sources"]
         )
@@ -20,8 +21,12 @@ def build_ui(rag: Any):
         query = gr.Textbox(
             label="Question", placeholder="What does the documentation say about ...?"
         )
+        source = gr.Textbox(
+            label="Source filter (optional)",
+            placeholder="Limit retrieval to a specific source filename",
+        )
         button = gr.Button("Ask")
         out_answer = gr.Textbox(label="Answer", lines=10)
         out_sources = gr.Textbox(label="Sources", lines=4)
-        button.click(answer, inputs=query, outputs=[out_answer, out_sources])
+        button.click(answer, inputs=[query, source], outputs=[out_answer, out_sources])
     return demo

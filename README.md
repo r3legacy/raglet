@@ -77,6 +77,13 @@ raglet serve --store ./.store
 raglet eval --store ./.store --data tests/sample_qa.json
 ```
 
+Useful flags:
+
+- `raglet ingest ./docs --reset` — wipe an existing index before indexing (re-ingesting the same folder is also idempotent thanks to content-hash dedupe).
+- `raglet ask "..." --source rag_intro.txt` — limit retrieval to a single source.
+- `raglet ask "..." --json` — emit the `{answer, sources, context}` result as JSON.
+- `raglet ask "..." --reranker cross-encoder --rerank-top-n 10` — choose a reranker and how many candidates it keeps.
+
 ## Going semantic & local
 
 Swap the zero-dep defaults for real local models:
@@ -153,8 +160,11 @@ raglet ships with a retrieval evaluation harness. Provide a JSON list of
 
 ```bash
 raglet eval --store ./.store --data tests/sample_qa.json
-# {"questions": 3, "answered": 3, "retrieval_recall@k": 1.0}
+# {"questions": 3, "answered": 3, "k": 5, "retrieval_recall@k": 1.0, "precision@k": 0.5, "mrr": 0.833}
 ```
+
+The report includes `retrieval_recall@k`, `precision@k` and `mrr` (mean
+reciprocal rank) over the labeled questions.
 
 ## License
 

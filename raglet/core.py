@@ -1,8 +1,9 @@
 """High-level RAG orchestration: ingest -> retrieve -> answer."""
 
+import hashlib
 import os
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from . import loaders
 from .chunking import chunk_text
@@ -55,15 +56,34 @@ class RAG:
         if self.config.use_rerank:
             self._reranker = get_reranker(self.config.reranker, **self.config.reranker_kwargs)
 
-    def ingest(self, path: str, glob: Optional[str] = None) -> int:
-        """Load documents from ``path`` and index them. Returns chunk count."""
+    def ingest(
+        self,
+        path: str,
+        glob: Optional[str] = None,
+        reset: bool = False,
+    ) -> int:
+        """Load documents from ``path`` and index them. Returns chunk count.
+
+        Args:
+            path: A file or directory of documents to index.
+            glob: Optional glob pattern when ``path`` is a directory.
+            reset: When ``True``, wipe any existing index before ingesting.
+        """
+        if reset:
+            self._reset_index()
+
         docs = loaders.load_documents(path, glob=glob)
         if not docs:
             return 0
 
         all_chunks: List[Dict[str, Any]] = []
+        seen_hashes = {self._chunk_hash(chunk["text"]) for chunk in self.store.chunks}
         for doc in docs:
             for piece in chunk_text(doc["text"], self.config.chunk_size, self.config.overlap):
+                chunk_hash = self._chunk_hash(piece)
+                if chunk_hash in seen_hashes:
+                    continue
+                seen_hashes.add(chunk_hash)
                 all_chunks.append(
                     {
                         "text": piece,
@@ -84,8 +104,37 @@ class RAG:
         self.save()
         return len(all_chunks)
 
-    def retrieve(self, query: str, k: Optional[int] = None) -> List[Dict[str, Any]]:
-        """Retrieve the most relevant chunks for ``query``."""
+    @staticmethod
+    def _chunk_hash(text: str) -> str:
+        """Stable content hash used to de-duplicate chunks across ingests."""
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    def _reset_index(self) -> None:
+        """Drop the in-memory index and any persisted store on disk."""
+        self.store = VectorStore()
+        self._bm25_corpus = []
+        self.bm25 = BM25()
+        store_dir = self.config.store_path
+        if os.path.isdir(store_dir):
+            for name in ("chunks.json", "embeddings.npy", "config.json"):
+                file_path = os.path.join(store_dir, name)
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+
+    def retrieve(
+        self,
+        query: str,
+        k: Optional[int] = None,
+        filter: Optional[Callable[[Dict[str, Any]], bool]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Retrieve the most relevant chunks for ``query``.
+
+        Args:
+            query: The user question.
+            k: Number of candidates to return (defaults to ``config.top_k``).
+            filter: Optional predicate applied to each chunk; only chunks for
+                which it returns ``True`` are considered.
+        """
         k = k or self.config.top_k
         rankings: List[List[int]] = []
 
@@ -112,15 +161,34 @@ class RAG:
             record["score"] = score
             candidates.append(record)
 
+        if filter is not None:
+            candidates = [c for c in candidates if filter(c)]
+        if not candidates:
+            return []
+
         if self._reranker is not None:
             candidates = self._reranker.rerank(query, candidates)[: self.config.rerank_top_n]
         else:
             candidates = candidates[:k]
         return candidates
 
-    def ask(self, query: str, k: Optional[int] = None) -> Dict[str, Any]:
-        """Retrieve context for ``query`` and generate an answer."""
-        candidates = self.retrieve(query, k=k)
+    def ask(
+        self,
+        query: str,
+        k: Optional[int] = None,
+        source: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Retrieve context for ``query`` and generate an answer.
+
+        Args:
+            query: The user question.
+            k: Number of candidates to retrieve.
+            source: Optional source basename to limit retrieval to.
+        """
+        chunk_filter = None
+        if source is not None:
+            chunk_filter = lambda chunk: chunk.get("source") == source
+        candidates = self.retrieve(query, k=k, filter=chunk_filter)
         if not candidates:
             return {"answer": "(no relevant context found)", "sources": [], "context": []}
         prompt = build_prompt(query, candidates)

@@ -10,7 +10,7 @@ from .core import RAG, RAGConfig
 from . import eval as eval_mod
 
 
-def _build_rag(args: argparse.Namespace) -> RAG:
+def _build_rag(args: argparse.Namespace, load: bool = True) -> RAG:
     config = RAGConfig(
         chunk_size=args.chunk_size,
         overlap=args.overlap,
@@ -19,22 +19,28 @@ def _build_rag(args: argparse.Namespace) -> RAG:
         store_path=args.store,
         use_sparse=not args.no_sparse,
         use_rerank=args.rerank,
+        reranker=getattr(args, "reranker", "score"),
+        rerank_top_n=getattr(args, "rerank_top_n", 5),
         top_k=args.top_k,
     )
     rag = RAG(config)
-    rag.load()
+    if load:
+        rag.load()
     return rag
 
 
 def cmd_ingest(args: argparse.Namespace) -> None:
-    rag = _build_rag(args)
-    count = rag.ingest(args.path)
+    rag = _build_rag(args, load=not args.reset)
+    count = rag.ingest(args.path, reset=args.reset)
     print(f"[raglet] indexed {count} chunks -> {rag.config.store_path}")
 
 
 def cmd_ask(args: argparse.Namespace) -> None:
     rag = _build_rag(args)
-    result = rag.ask(args.question, k=args.top_k)
+    result = rag.ask(args.question, k=args.top_k, source=getattr(args, "source", None))
+    if getattr(args, "json", False):
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
     print("\nANSWER:\n" + result["answer"])
     print("\nSOURCES:")
     for source in result["sources"]:
@@ -79,6 +85,13 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--no-sparse", action="store_true")
     parser.add_argument("--rerank", action="store_true")
+    parser.add_argument(
+        "--reranker",
+        default="score",
+        choices=["score", "cross-encoder", "llm"],
+    )
+    parser.add_argument("--rerank-top-n", type=int, default=5)
+    parser.add_argument("--source", default=None, help="Limit retrieval to this source.")
 
 
 def main(argv: Optional[list] = None) -> None:
@@ -90,10 +103,14 @@ def main(argv: Optional[list] = None) -> None:
 
     ingest = subparsers.add_parser("ingest", parents=[_common()], help="Index files or a folder.")
     ingest.add_argument("path")
+    ingest.add_argument(
+        "--reset", action="store_true", help="Wipe the existing index before ingesting."
+    )
     ingest.set_defaults(func=cmd_ingest)
 
     ask = subparsers.add_parser("ask", parents=[_common()], help="Ask a question.")
     ask.add_argument("question")
+    ask.add_argument("--json", action="store_true", help="Emit the result as JSON.")
     ask.set_defaults(func=cmd_ask)
 
     serve = subparsers.add_parser("serve", parents=[_common()], help="Launch the Gradio web UI.")
