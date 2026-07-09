@@ -4,7 +4,7 @@ import hashlib
 import json
 import os
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from . import loaders
 from .chunking import chunk_parent_child, chunk_text
@@ -46,6 +46,7 @@ class RAGConfig:
     child_overlap: int = 50
     query_expansion: str = "none"
     memory_size: int = 0
+    answer_threshold: float = 0.15
 
 
 class RAG:
@@ -228,6 +229,7 @@ class RAG:
         query: str,
         k: Optional[int] = None,
         filter: Optional[Callable[[Dict[str, Any]], bool]] = None,
+        filters: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """Retrieve the most relevant chunks for ``query``.
 
@@ -241,8 +243,11 @@ class RAG:
             k: Number of candidates to return (defaults to ``config.top_k``).
             filter: Optional predicate applied to each chunk; only chunks for
                 which it returns ``True`` are considered.
+            filters: Optional declarative metadata filter (key/value pairs) that
+                restricts which chunks are searched before ranking.
         """
         k = k or self.config.top_k
+        allowed = self._allowed_ids(filters)
         rankings: List[List[int]] = []
         weights: List[float] = []
 
@@ -250,14 +255,14 @@ class RAG:
         for q in queries:
             query_vec = self.embedder.embed_query(q)
             dense = self.store.search(
-                query_vec, k=max(k, 10) if self.config.use_sparse else k
+                query_vec, k=max(k, 10) if self.config.use_sparse else k, allowed=allowed
             )
             if dense:
                 rankings.append([chunk["_id"] for chunk in dense])
                 weights.append(self.config.dense_weight)
 
             if self.config.use_sparse and self._bm25_corpus:
-                sparse = self.bm25.search(q, k=max(k, 10))
+                sparse = self.bm25.search(q, k=max(k, 10), allowed=allowed)
                 rankings.append([index for index, _ in sparse])
                 weights.append(self.config.sparse_weight)
 
@@ -288,6 +293,32 @@ class RAG:
         else:
             candidates = candidates[:k]
         return candidates
+
+    def _allowed_ids(self, filters: Optional[Dict[str, Any]]) -> Optional[set]:
+        """Return the set of chunk ids whose metadata matches ``filters``.
+
+        Returns ``None`` when no filters are given (meaning: consider all
+        chunks). A chunk matches when every filter key equals the corresponding
+        metadata value; a filter value may be a list, in which case a match is
+        any element of that list.
+        """
+        if not filters:
+            return None
+        allowed: set = set()
+        for chunk in self.store.chunks:
+            meta = chunk.get("metadata") or {}
+            if all(self._meta_match(meta, key, value) for key, value in filters.items()):
+                allowed.add(chunk["_id"])
+        return allowed
+
+    @staticmethod
+    def _meta_match(meta: Dict[str, Any], key: str, value: Any) -> bool:
+        if key not in meta:
+            return False
+        stored = meta[key]
+        if isinstance(value, list):
+            return stored in value
+        return stored == value
 
     def _expand_query(self, query: str) -> List[str]:
         """Return the list of query strings to search with (expansion aware)."""
@@ -323,8 +354,14 @@ class RAG:
         k: Optional[int] = None,
         source: Optional[str] = None,
         session_id: Optional[str] = None,
+        filters: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Retrieve context for ``query`` and generate an answer.
+
+        The returned dict adds ``confidence`` (0–1) and ``citations`` (the
+        numbered sources used) beyond the usual ``answer``/``sources``/``context``.
+        When the best retrieval score falls below ``config.answer_threshold`` the
+        pipeline abstains instead of returning a weakly supported answer.
 
         Args:
             query: The user question.
@@ -338,24 +375,112 @@ class RAG:
             return chunk.get("source") == source
 
         candidates = self.retrieve(
-            query, k=k, filter=chunk_filter if source is not None else None
+            query, k=k, filter=chunk_filter if source is not None else None, filters=filters
         )
         if not candidates:
-            return {"answer": "(no relevant context found)", "sources": [], "context": []}
+            return {
+                "answer": "(no relevant context found)",
+                "sources": [],
+                "context": [],
+                "confidence": 0.0,
+                "citations": [],
+            }
 
+        confidence = self._confidence(candidates)
+        citations = [
+            {"index": index + 1, "source": chunk.get("source"), "score": chunk.get("score")}
+            for index, chunk in enumerate(candidates)
+        ]
         history = None
         if self.memory is not None:
             history = self.memory.history(session_id) if session_id else None
         prompt = build_prompt(query, candidates, history=history)
-        answer = self.llm.generate(prompt, context_chunks=candidates)
+
+        if confidence < self.config.answer_threshold:
+            answer = "(not enough context to answer confidently)"
+        else:
+            answer = self.llm.generate(prompt, context_chunks=candidates)
+
         sources = [
             {"source": chunk.get("source"), "score": chunk.get("score")}
             for chunk in candidates
         ]
-        result = {"answer": answer, "sources": sources, "context": candidates}
+        result = {
+            "answer": answer,
+            "sources": sources,
+            "context": candidates,
+            "confidence": round(confidence, 3),
+            "citations": citations,
+        }
         if self.memory is not None and session_id:
             self.memory.add(session_id, query, answer)
         return result
+
+    def ask_stream(
+        self,
+        query: str,
+        k: Optional[int] = None,
+        source: Optional[str] = None,
+        session_id: Optional[str] = None,
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> Iterator[str]:
+        """Stream an answer token-by-token (see :meth:`ask` for semantics).
+
+        Yields answer text chunks as they are produced. When retrieval yields
+        nothing, or the confidence is below ``config.answer_threshold``, a single
+        abstention message is yielded instead.
+        """
+        def chunk_filter(chunk: Dict[str, Any]) -> bool:
+            return chunk.get("source") == source
+
+        candidates = self.retrieve(
+            query, k=k, filter=chunk_filter if source is not None else None, filters=filters
+        )
+        if not candidates:
+            yield "(no relevant context found)"
+            return
+
+        confidence = self._confidence(candidates)
+        history = None
+        if self.memory is not None:
+            history = self.memory.history(session_id) if session_id else None
+        prompt = build_prompt(query, candidates, history=history)
+
+        if confidence < self.config.answer_threshold:
+            message = "(not enough context to answer confidently)"
+            if self.memory is not None and session_id:
+                self.memory.add(session_id, query, message)
+            yield message
+            return
+
+        answer_parts: List[str] = []
+        for chunk in self.llm.stream(prompt, context_chunks=candidates):
+            answer_parts.append(chunk)
+            yield chunk
+
+        if self.memory is not None and session_id:
+            self.memory.add(session_id, query, "".join(answer_parts))
+
+    def _confidence(self, candidates: List[Dict[str, Any]]) -> float:
+        """Estimate answer confidence from the retrieval score distribution.
+
+        Combines how *strong* the best hit is (absolute RRF score versus its
+        theoretical maximum) with how much *better* it is than the runner-up
+        (relative gap). The two factors are blended so that a strong top hit
+        still scores well even when runners-up are close (avoids constant
+        abstention when the hash embedder produces ties).
+        """
+        scores = [float(c.get("score", 0.0) or 0.0) for c in candidates]
+        if not scores or max(scores) <= 0:
+            return 0.0
+        max_weight = max(self.config.dense_weight, self.config.sparse_weight, 1.0)
+        max_possible = max_weight / (self.config.rrf_k + 1)
+        absolute = min(1.0, max(scores) / max_possible)
+        if len(scores) > 1:
+            gap = (max(scores) - sorted(scores, reverse=True)[1]) / max(scores)
+        else:
+            gap = 1.0
+        return absolute * (0.5 + 0.5 * gap)
 
     def save(self) -> None:
         self.store.save(self.config.store_path)
@@ -400,6 +525,7 @@ class RAG:
             "child_size": self.config.child_size,
             "child_overlap": self.config.child_overlap,
             "query_expansion": self.config.query_expansion,
+            "answer_threshold": self.config.answer_threshold,
         }
         with open(config_path, "w", encoding="utf-8") as handle:
             json.dump(serializable, handle, ensure_ascii=False, indent=2)
@@ -455,6 +581,7 @@ class RAG:
         self.config.child_size = saved.get("child_size", self.config.child_size)
         self.config.child_overlap = saved.get("child_overlap", self.config.child_overlap)
         self.config.query_expansion = saved.get("query_expansion", self.config.query_expansion)
+        self.config.answer_threshold = saved.get("answer_threshold", self.config.answer_threshold)
 
         self.embedder = get_embedder(self.config.embedder, **self.config.embedder_kwargs)
         self.llm = get_llm(self.config.llm, **self.config.llm_kwargs)

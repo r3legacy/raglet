@@ -27,12 +27,19 @@ local models and cloud APIs.
 - **Hybrid retrieval** — dense + BM25 fused with Reciprocal Rank Fusion (RRF).
 - **Pluggable embedders** — `hash` (zero-dep), `local` (sentence-transformers), `openai`, `ollama`.
 - **Pluggable LLMs** — `extractive` (offline baseline), `ollama`, `openai`, `anthropic`.
-- **Optional reranking** — score-based or cross-encoder rerankers.
+- **Optional reranking** — score-based, cross-encoder, or a real LLM judge
+  that reorders fused candidates (degrades to score ordering offline).
 - **Parent-child chunking** — index small chunks for precise retrieval but answer
   from the larger parent context (the small-to-big pattern).
 - **Query expansion** — broaden recall with multi-query decomposition or
   Hypothetical Document Embeddings (HyDE). Offline-friendly via lexical fallback.
 - **Conversation memory** — multi-turn sessions that remember prior Q/A turns.
+- **Metadata filtering** — restrict retrieval to chunks matching `key=value`
+  metadata (e.g. `--filter tag=policy`).
+- **Confidence & citations** — `ask()` reports a 0–1 confidence score and
+  numbered source citations, and abstains when retrieval is too weak.
+- **Streaming answers** — token-by-token responses via `ask_stream` and
+  `raglet ask --stream` (ollama/openai/anthropic).
 - **Built-in evaluation** — measure retrieval recall *and* answer faithfulness.
 - **Tiny & readable** — every module is a few dozen lines; great for learning RAG.
 - **CLI + Python API + Gradio UI** — use it however you like.
@@ -91,6 +98,9 @@ Useful flags:
 - `raglet ingest ./docs --chunking-strategy parent_child` — retrieve on small chunks, answer from the parent window.
 - `raglet ask "..." --query-expansion multi` — decompose the query into variants to improve recall (use `hyde` with a real LLM for Hypothetical Document Embeddings).
 - `raglet ask "..." --session my-session --memory-size 4` — keep a multi-turn conversation across calls (`--memory-size` is a runtime switch; no need to rebuild the index).
+- `raglet ask "..." --filter tag=policy` — restrict retrieval to chunks whose metadata matches `key=value` (repeatable).
+- `raglet ask "..." --stream` — stream the answer token by token (supported by the ollama/openai/anthropic LLMs).
+- `raglet ask "..." --reranker llm --rerank-top-n 10` — rerank fused candidates with a real LLM judge (degrades to score ordering offline).
 - `raglet rm <source>` — remove a single source from an existing index.
 - `raglet eval --store ./.store --data tests/sample_qa.json --answers` — also score generated-answer faithfulness (add `--judge llm` to use the LLM as judge).
 
@@ -172,6 +182,34 @@ rag = RAG(RAGConfig(query_expansion="multi"))   # or "hyde" with an LLM
 Pass a `session_id` to `ask()` (and set `memory_size > 0`) to keep recent
 turns in the prompt, enabling follow-up questions. Sessions persist to disk so
 the CLI keeps a conversation alive across invocations.
+
+### Tuning fusion & confidence
+
+`RAGConfig` exposes the knobs for the hybrid stage so you can bias dense vs.
+sparse retrieval and control abstention:
+
+```python
+from raglet import RAG, RAGConfig
+
+rag = RAG(RAGConfig(
+    rrf_k=60,            # RRF smoothing constant
+    dense_weight=1.0,     # emphasis given to the dense (semantic) ranking
+    sparse_weight=1.0,    # emphasis given to the BM25 (lexical) ranking
+    answer_threshold=0.15,  # below this confidence the pipeline abstains
+))
+```
+
+`ask()` returns a `confidence` score (0–1) derived from the retrieval-score
+distribution, plus a numbered `citations` list mapping each source to its rank.
+When `confidence` is below `answer_threshold` the answer is replaced with a
+"No enough context to answer confidently" message instead of a weak guess.
+
+### Streaming answers
+
+```python
+for chunk in rag.ask_stream("Summarize the onboarding guide."):
+    print(chunk, end="", flush=True)
+```
 
 ### Answer faithfulness evaluation
 

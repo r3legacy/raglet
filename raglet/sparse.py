@@ -2,7 +2,7 @@
 
 import math
 import re
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 _TOKEN = re.compile(r"[a-z0-9]+")
 
@@ -43,10 +43,14 @@ class BM25:
             for token, df in self.df.items()
         }
 
-    def search(self, query: str, k: int = 5) -> List[Tuple[int, float]]:
+    def search(
+        self, query: str, k: int = 5, allowed: Optional[set] = None
+    ) -> List[Tuple[int, float]]:
         query_tokens = _tokenize(query)
-        scores = []
+        scored: List[Tuple[int, float]] = []
         for index, (tokens, freq) in enumerate(zip(self.docs, self.doc_freqs)):
+            if allowed is not None and index not in allowed:
+                continue
             score = 0.0
             doc_len = self.doc_lens[index]
             for token in query_tokens:
@@ -58,6 +62,6 @@ class BM25:
                     1 - self.b + self.b * (doc_len / self.avgdl if self.avgdl else 1)
                 )
                 score += token_idf * (term_freq * (self.k1 + 1)) / denom
-            scores.append(score)
-        order = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:k]
-        return [(i, scores[i]) for i in order]
+            scored.append((index, score))
+        scored.sort(key=lambda item: item[1], reverse=True)
+        return scored[:k]

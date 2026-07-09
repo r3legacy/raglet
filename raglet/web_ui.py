@@ -37,14 +37,24 @@ def build_ui(rag: Any):
         def handle(q, s, sess):
             source_filter = s.strip() or None
             session_id = sess.strip() or None
-            result = rag.ask(q, source=source_filter, session_id=session_id)
+            # Resolve sources/history once (without persisting memory) so the
+            # streamed answer can be shown progressively alongside them.
+            base = rag.ask(q, source=source_filter, session_id=None)
             sources = "\n".join(
-                f"- {src['source']} ({src.get('score', 0):.3f})" for src in result["sources"]
+                f"- {src['source']} ({src.get('score', 0):.3f})" for src in base["sources"]
             )
+            answer = ""
+            for chunk in rag.ask_stream(
+                q, source=source_filter, session_id=session_id
+            ):
+                answer += chunk
+                yield answer, sources or "(no sources)", "(streaming…)"
             history = ""
             if session_id and rag.memory is not None:
-                history = "\n".join(f"Q: {q}\nA: {a}" for q, a in rag.memory.history(session_id))
-            return result["answer"], sources or "(no sources)", history or "(no history)"
+                history = "\n".join(
+                    f"Q: {q}\nA: {a}" for q, a in rag.memory.history(session_id)
+                )
+            yield answer, sources or "(no sources)", history or "(no history)"
 
         button.click(
             handle, inputs=[query, source, session], outputs=[out_answer, out_sources, out_history]

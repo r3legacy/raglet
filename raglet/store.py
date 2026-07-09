@@ -55,7 +55,9 @@ class VectorStore:
         else:
             self._index = None
 
-    def search(self, query_vec: List[float], k: int = 5) -> List[Dict[str, Any]]:
+    def search(
+        self, query_vec: List[float], k: int = 5, allowed: Optional[set] = None
+    ) -> List[Dict[str, Any]]:
         if self._emb is None or len(self.chunks) == 0:
             return []
         query = np.asarray(query_vec, dtype="float32").reshape(1, -1)
@@ -64,15 +66,27 @@ class VectorStore:
             query = query / norm
         k = min(k, self._emb.shape[0])
 
-        if self._index is not None:
-            scores, indices = self._index.search(query, k)
-            indices = indices[0].tolist()
-            scores = scores[0].tolist()
+        if allowed is None:
+            if self._index is not None:
+                scores, indices = self._index.search(query, k)
+                indices = indices[0].tolist()
+                scores = scores[0].tolist()
+            else:
+                sims = self._emb @ query[0]
+                order = np.argsort(-sims)[:k]
+                indices = order.tolist()
+                scores = sims[order].tolist()
         else:
-            sims = self._emb @ query[0]
+            # Restrict the search to the allowed chunk ids (used for metadata
+            # filtering) by scoring only those rows with numpy.
+            allowed_rows = [(i, c) for i, c in enumerate(self.chunks) if c.get("_id") in allowed]
+            if not allowed_rows:
+                return []
+            rows = np.asarray([self._emb[i] for i, _ in allowed_rows], dtype="float32")
+            sims = rows @ query[0]
             order = np.argsort(-sims)[:k]
-            indices = order.tolist()
-            scores = sims[order].tolist()
+            indices = [allowed_rows[i][0] for i in order]
+            scores = [float(sims[i]) for i in order]
 
         results: List[Dict[str, Any]] = []
         for index, score in zip(indices, scores):

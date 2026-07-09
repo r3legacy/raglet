@@ -39,20 +39,49 @@ def cmd_ingest(args: argparse.Namespace) -> None:
 
 def cmd_ask(args: argparse.Namespace) -> None:
     rag = _build_rag(args)
+    filters = _parse_filters(getattr(args, "filter", None))
+
+    if getattr(args, "stream", False):
+        for chunk in rag.ask_stream(
+            args.question,
+            k=args.top_k,
+            source=getattr(args, "source", None),
+            session_id=getattr(args, "session", None),
+            filters=filters,
+        ):
+            print(chunk, end="", flush=True)
+        print()
+        return
+
     result = rag.ask(
         args.question,
         k=args.top_k,
         source=getattr(args, "source", None),
         session_id=getattr(args, "session", None),
+        filters=filters,
     )
     if getattr(args, "json", False):
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
     print("\nANSWER:\n" + result["answer"])
+    print(f"\nCONFIDENCE: {result.get('confidence', 0.0):.3f}")
     print("\nSOURCES:")
     for source in result["sources"]:
         score = source.get("score", 0.0)
         print(f"  - {source['source']}  (score {score:.3f})")
+
+
+def _parse_filters(pairs: Optional[list]) -> Optional[dict]:
+    """Turn repeated ``key=value`` CLI flags into a metadata filter dict."""
+    if not pairs:
+        return None
+    filters: dict = {}
+    for pair in pairs:
+        if "=" not in pair:
+            continue
+        key, value = pair.split("=", 1)
+        filters[key.strip()] = value.strip()
+    return filters or None
 
 
 def cmd_serve(args: argparse.Namespace) -> None:
@@ -148,6 +177,13 @@ def main(argv: Optional[list] = None) -> None:
     ask.add_argument("question")
     ask.add_argument("--json", action="store_true", help="Emit the result as JSON.")
     ask.add_argument("--session", default=None, help="Conversation session id (needs --memory-size).")
+    ask.add_argument(
+        "--filter",
+        action="append",
+        default=[],
+        help="Metadata filter as key=value (repeatable), e.g. --filter tag=policy.",
+    )
+    ask.add_argument("--stream", action="store_true", help="Stream the answer token by token.")
     ask.set_defaults(func=cmd_ask)
 
     serve = subparsers.add_parser("serve", parents=[_common()], help="Launch the Gradio web UI.")

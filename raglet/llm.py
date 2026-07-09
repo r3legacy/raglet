@@ -1,9 +1,11 @@
 """LLM providers and prompt construction."""
 
+import json
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 _TOKEN_SPLIT = re.compile(r"\s+")
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
 
 
 class LLMProvider:
@@ -12,13 +14,24 @@ class LLMProvider:
     def generate(self, prompt: str, **kwargs: Any) -> str:
         raise NotImplementedError
 
+    def stream(self, prompt: str, **kwargs: Any) -> Iterator[str]:
+        """Yield the answer as a sequence of text chunks.
+
+        The default implementation yields the whole answer at once, which is
+        appropriate for offline backends (extractive/dummy) and any provider
+        that does not support incremental decoding.
+        """
+        yield self.generate(prompt, **kwargs)
+
 
 class ExtractiveLLM(LLMProvider):
-    """Offline baseline: returns the chunk most relevant to the query.
+    """Offline baseline: extracts the passage most relevant to the query.
 
     Relevance is the lexical overlap (Jaccard over token sets) between the
     query and each candidate chunk, falling back to the retrieval score when
-    available. This keeps raglet fully functional with zero model downloads.
+    available. Rather than returning a whole chunk verbatim, the most relevant
+    *sentence* is extracted so the answer reads like an answer. This keeps
+    raglet fully functional with zero model downloads.
     """
 
     def generate(self, prompt: str, context_chunks: Optional[List[Dict[str, Any]]] = None, **kwargs: Any) -> str:
@@ -40,7 +53,26 @@ class ExtractiveLLM(LLMProvider):
             if combined > best_score:
                 best_score = combined
                 best_chunk = chunk
-        return best_chunk["text"]
+        return _best_sentence(query_tokens, best_chunk["text"])
+
+
+def _best_sentence(query_tokens: set, text: str) -> str:
+    """Return the sentence in ``text`` with the highest query token overlap."""
+    sentences = [s.strip() for s in _SENTENCE_SPLIT.split(text) if s.strip()]
+    if not sentences:
+        return text.strip()
+    if len(sentences) == 1:
+        return sentences[0]
+
+    best = None
+    best_overlap = -1
+    for sentence in sentences:
+        tokens = set(_TOKEN_SPLIT.split(sentence.lower()))
+        overlap = len(query_tokens & tokens)
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best = sentence
+    return best or sentences[0]
 
 
 def _query_from_prompt(prompt: str) -> str:
@@ -95,6 +127,27 @@ class OllamaLLM(LLMProvider):
         response.raise_for_status()
         return response.json().get("response", "")
 
+    def stream(self, prompt: str, **kwargs: Any) -> Iterator[str]:
+        import requests
+
+        payload: Dict[str, Any] = {"model": self.model, "prompt": prompt, "stream": True}
+        if self.system:
+            payload["system"] = self.system
+        with requests.post(
+            f"{self.base_url}/api/generate", json=payload, timeout=120, stream=True
+        ) as response:
+            response.raise_for_status()
+            for line in response.iter_lines(decode_unicode=True):
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except ValueError:
+                    continue
+                chunk = data.get("response", "")
+                if chunk:
+                    yield chunk
+
 
 class OpenAILLM(LLMProvider):
     """OpenAI chat completions backend."""
@@ -120,6 +173,19 @@ class OpenAILLM(LLMProvider):
         messages.append({"role": "user", "content": prompt})
         response = self._client.chat.completions.create(model=self.model, messages=messages)
         return response.choices[0].message.content or ""
+
+    def stream(self, prompt: str, **kwargs: Any) -> Iterator[str]:
+        messages: List[Dict[str, str]] = []
+        if self.system:
+            messages.append({"role": "system", "content": self.system})
+        messages.append({"role": "user", "content": prompt})
+        stream = self._client.chat.completions.create(
+            model=self.model, messages=messages, stream=True
+        )
+        for chunk in stream:
+            delta = chunk.choices[0].delta.content or ""
+            if delta:
+                yield delta
 
 
 class AnthropicLLM(LLMProvider):
@@ -148,6 +214,16 @@ class AnthropicLLM(LLMProvider):
         )
         return "".join(block.text for block in response.content if block.type == "text")
 
+    def stream(self, prompt: str, **kwargs: Any) -> Iterator[str]:
+        with self._client.messages.stream(
+            model=self.model,
+            max_tokens=1024,
+            system=self.system or "You are a helpful assistant.",
+            messages=[{"role": "user", "content": prompt}],
+        ) as stream:
+            for text in stream.text_stream:
+                yield text
+
 
 _LLMS = {
     "extractive": ExtractiveLLM,
@@ -171,7 +247,11 @@ def build_prompt(
     max_context_chars: int = 6000,
     history: Optional[List[tuple]] = None,
 ) -> str:
-    """Build a grounded prompt that cites the retrieved sources."""
+    """Build a grounded prompt that cites the retrieved sources.
+
+    Sources are numbered ``[1]``, ``[2]`` … and the model is instructed to cite
+    the relevant numbers inline so answers can be traced back to sources.
+    """
     parts: List[str] = []
     used = 0
     for index, chunk in enumerate(chunks):
@@ -194,7 +274,7 @@ def build_prompt(
 
     return (
         "Answer the question using ONLY the context below. "
-        "Cite the source filenames. "
+        "Cite the source numbers like [1] or [2] in your answer. "
         "If the answer is not in the context, say you don't know.\n\n"
         f"{history_block}"
         f"CONTEXT:\n{context}\n\nQUESTION: {query}\n\nANSWER:"
